@@ -1,320 +1,217 @@
+from __future__ import annotations
+
+import hmac
 import os
-import requests
-from io import BytesIO
-from PIL import Image
-import numpy as np
-from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from sentence_transformers import SentenceTransformer
-from sqlalchemy import create_engine, text
-from sqlalchemy.orm import sessionmaker
-from concurrent.futures import ThreadPoolExecutor
+import uuid
+
 import strawberry
+from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
 from strawberry.fastapi import GraphQLRouter
-import cv2
+from strawberry.types import Info
 
-# Setup Database connection
-DATABASE_URL = os.getenv(
-    "DATABASE_URL", 
-    "postgresql://postgres:postgres@localhost:5432/fakebook"
+from .operations import (
+    RecommendationOperations,
+    RecommendationUnavailableError,
+    get_operations,
 )
 
-try:
-    engine = create_engine(DATABASE_URL)
-    SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-except Exception as e:
-    print(f"Warning: Database engine connection failed: {e}")
-    SessionLocal = None
 
-# Initialize Multilingual CLIP model for text (512 dimensions)
-model = SentenceTransformer("sentence-transformers/clip-ViT-B-32-multilingual-v1")
+INTERNAL_SECRET_HEADER = "X-Gateway-Secret"
+CORRELATION_HEADER = "X-Correlation-ID"
 
-# Initialize original CLIP model for images/videos (512 dimensions)
-image_model = SentenceTransformer("clip-ViT-B-32")
-
-def download_image(url: str) -> Image.Image:
-    """Download image from URL and convert to PIL Image"""
-    try:
-        response = requests.get(url, timeout=10)
-        response.raise_for_status()
-        return Image.open(BytesIO(response.content)).convert("RGB")
-    except Exception as e:
-        print(f"Error downloading image {url}: {e}")
-        return None
-
-def extract_video_frames(url: str, interval_seconds: float = 10.0) -> list[Image.Image]:
-    """Stream video from URL and extract frames at regular intervals (default: every 10s)"""
-    frames = []
-    try:
-        cap = cv2.VideoCapture(url)
-        if not cap.isOpened():
-            print(f"Warning: Could not open video {url}")
-            return frames
-            
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        # Fallback if FPS is not read correctly
-        if fps <= 0:
-            fps = 25.0
-            
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        frame_step = int(interval_seconds * fps)
-        if frame_step <= 0:
-            frame_step = 1
-            
-        for frame_idx in range(0, total_frames, frame_step):
-            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
-            ret, frame = cap.read()
-            if not ret:
-                break
-            # Convert BGR (OpenCV format) to RGB
-            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            pil_img = Image.fromarray(rgb_frame)
-            frames.append(pil_img)
-            
-        cap.release()
-    except Exception as e:
-        print(f"Error extracting frames from video {url}: {e}")
-    return frames
-
-def download_media(url: str) -> list[Image.Image]:
-    """Download media from URL (image or video) and convert to list of PIL Images.
-    If it's an image, returns a list containing 1 PIL Image.
-    If it's a video, extracts frames every 10 seconds and returns a list of PIL Images.
-    """
-    # Detect video by file extension or content-type
-    is_video = False
-    lower_url = url.lower()
-    video_extensions = (".mp4", ".avi", ".mov", ".mkv", ".webm", ".3gp", ".ogg")
-    if any(ext in lower_url for ext in video_extensions):
-        is_video = True
-    else:
-        # Check Content-Type via a quick HEAD request
-        try:
-            head_res = requests.head(url, timeout=5, allow_redirects=True)
-            content_type = head_res.headers.get("Content-Type", "")
-            if "video" in content_type:
-                is_video = True
-        except Exception:
-            pass
-
-    if is_video:
-        return extract_video_frames(url, interval_seconds=10.0)
-    else:
-        # Treat as image
-        img = download_image(url)
-        return [img] if img else []
-
-def generate_multimodal_embedding(title: str, image_urls: list = None):
-    # 1. Generate text embedding
-    text_emb = model.encode(title, normalize_embeddings=True)
-    
-    # 2. Generate image / video frame embeddings
-    image_embs = []
-    if image_urls:
-        # Download and process media concurrently
-        with ThreadPoolExecutor(max_workers=min(len(image_urls), 8)) as executor:
-            # download_media returns a list of PIL Images for each URL
-            results = list(executor.map(download_media, image_urls))
-        
-        # Flatten the list of lists of images
-        valid_images = []
-        for img_list in results:
-            for img in img_list:
-                if img is not None:
-                    valid_images.append(img)
-        
-        if valid_images:
-            # Batch encode all valid images/frames at once for maximum performance using the image model
-            image_embs = image_model.encode(valid_images, normalize_embeddings=True)
-                
-    # 3. Fuse Text & Image embeddings
-    if len(image_embs) > 0:
-        mean_image_emb = np.mean(image_embs, axis=0)
-        # Combine: 60% text, 40% image/video mean
-        combined_emb = 0.6 * text_emb + 0.4 * mean_image_emb
-        # Normalize to unit vector
-        combined_emb = combined_emb / np.linalg.norm(combined_emb)
-        return combined_emb.tolist()
-    
-    return text_emb.tolist()
+app = FastAPI(title="Fakebook Recommendation", version="1.0")
 
 
-def save_embedding(db, post_id: int, embedding: list):
-    db.execute(
-        text("""
-            INSERT INTO post_embeddings (post_id, embedding)
-            VALUES (:post_id, :embedding)
-            ON CONFLICT (post_id) DO UPDATE 
-            SET embedding = EXCLUDED.embedding, updated_at = NOW();
-        """),
-        {
-            "post_id": post_id,
-            "embedding": embedding,
-        }
-    )
-    db.commit()
+@app.middleware("http")
+async def internal_security_and_correlation(request: Request, call_next):
+    correlation_id = request.headers.get(CORRELATION_HEADER) or uuid.uuid4().hex
 
-def save_user_embedding(db, user_id: int, embedding: list):
-    db.execute(
-        text("""
-            INSERT INTO user_embeddings (user_id, embedding, updated_at)
-            VALUES (:user_id, :embedding, NOW())
-            ON CONFLICT (user_id) DO UPDATE 
-            SET embedding = EXCLUDED.embedding, updated_at = NOW();
-        """),
-        {
-            "user_id": user_id,
-            "embedding": embedding,
-        }
-    )
-    db.commit()
+    if request.url.path == "/internal" or request.url.path.startswith("/internal/"):
+        expected_secret = os.getenv("INTERNAL_SHARED_SECRET", "")
+        provided_secret = request.headers.get(INTERNAL_SECRET_HEADER, "")
+        if len(expected_secret.encode("utf-8")) < 32:
+            response = JSONResponse(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                content={
+                    "error": {
+                        "code": "INTERNAL_AUTH_NOT_CONFIGURED",
+                        "message": "Internal service authentication is not configured.",
+                    }
+                },
+            )
+            response.headers[CORRELATION_HEADER] = correlation_id
+            return response
 
-def parse_vector(val):
-    """Safely parse vector returned from database to a numpy array"""
-    if isinstance(val, str):
-        # Format usually is "[0.1, 0.2, ...]"
-        clean_val = val.strip("[]")
-        if not clean_val:
-            return np.zeros(512)
-        return np.array([float(x) for x in clean_val.split(",")])
-    elif isinstance(val, list):
-        return np.array(val)
-    elif isinstance(val, np.ndarray):
-        return val
-    return np.array(val)
+        if not hmac.compare_digest(
+            expected_secret.encode("utf-8"),
+            provided_secret.encode("utf-8"),
+        ):
+            response = JSONResponse(
+                status_code=status.HTTP_403_FORBIDDEN,
+                content={
+                    "error": {
+                        "code": "FORBIDDEN",
+                        "message": "Internal service authentication failed.",
+                    }
+                },
+            )
+            response.headers[CORRELATION_HEADER] = correlation_id
+            return response
 
-app = FastAPI()
+    response = await call_next(request)
+    response.headers[CORRELATION_HEADER] = correlation_id
+    return response
 
-# Enable CORS so the React frontend can call it directly from the browser
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+
+class PostEmbeddingRequest(BaseModel):
+    content: str = Field(min_length=1, max_length=50_000)
+    mediaUrls: list[str] = Field(default_factory=list, max_length=100)
+
+
+class UserEmbeddingPayload(BaseModel):
+    success: bool
+    userId: int
+    created: bool
+    message: str
+
+
+class PostEmbeddingPayload(BaseModel):
+    success: bool
+    postId: int
+
+
+def _translate_operation_error(exception: Exception) -> HTTPException:
+    if isinstance(exception, RecommendationUnavailableError):
+        return HTTPException(status_code=503, detail=str(exception))
+    if isinstance(exception, ValueError):
+        return HTTPException(status_code=400, detail=str(exception))
+    return HTTPException(status_code=500, detail="Recommendation operation failed.")
+
+
+@app.get("/health")
+def health() -> dict[str, str]:
+    return {"status": "ok"}
+
+
+@app.put(
+    "/internal/recommendation/users/{user_id}/embedding",
+    response_model=UserEmbeddingPayload,
 )
+def ensure_user_embedding(
+    user_id: int,
+    operations: RecommendationOperations = Depends(get_operations),
+) -> UserEmbeddingPayload:
+    try:
+        created = operations.ensure_user_embedding(user_id)
+    except Exception as exception:
+        raise _translate_operation_error(exception) from exception
+
+    return UserEmbeddingPayload(
+        success=True,
+        userId=user_id,
+        created=created,
+        message="User embedding created." if created else "User embedding already exists.",
+    )
+
+
+@app.delete(
+    "/internal/recommendation/users/{user_id}/embedding",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+def delete_user_embedding(
+    user_id: int,
+    operations: RecommendationOperations = Depends(get_operations),
+) -> Response:
+    try:
+        operations.delete_user_embedding(user_id)
+    except Exception as exception:
+        raise _translate_operation_error(exception) from exception
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@app.put(
+    "/internal/recommendation/posts/{post_id}/embedding",
+    response_model=PostEmbeddingPayload,
+)
+def upsert_post_embedding(
+    post_id: int,
+    request: PostEmbeddingRequest,
+    operations: RecommendationOperations = Depends(get_operations),
+) -> PostEmbeddingPayload:
+    try:
+        operations.upsert_post_embedding(post_id, request.content, request.mediaUrls)
+    except Exception as exception:
+        raise _translate_operation_error(exception) from exception
+    return PostEmbeddingPayload(success=True, postId=post_id)
+
+
+@app.delete(
+    "/internal/recommendation/posts/{post_id}/embedding",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+def delete_post_embedding(
+    post_id: int,
+    operations: RecommendationOperations = Depends(get_operations),
+) -> Response:
+    try:
+        operations.delete_post_embedding(post_id)
+    except Exception as exception:
+        raise _translate_operation_error(exception) from exception
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
 
 @strawberry.type
-class EmbeddingResponse:
-    success: bool
-    post_id: int
+class RecommendationItem:
+    post_id: strawberry.ID
+    score: float
+    semantic_score: float
+    social_score: float
 
-@strawberry.type
-class UserEmbeddingResponse:
-    success: bool
-    user_id: int
-    message: str | None = None
 
 @strawberry.type
 class Query:
     @strawberry.field
     def hello(self) -> str:
-        return "Hello from Embedding GraphQL API"
+        return "Hello from Fakebook Recommendation"
 
-@strawberry.type
-class Mutation:
-    @strawberry.mutation
-    def initialize_user_embedding(self, user_id: int) -> UserEmbeddingResponse:
-        if SessionLocal is None:
-            raise Exception("Database connection is not initialized.")
-            
-        # Generate random 512-dim vector
-        rand_emb = np.random.randn(512)
-        # Normalize
-        rand_emb = rand_emb / np.linalg.norm(rand_emb)
-        
-        db = SessionLocal()
-        try:
-            save_user_embedding(db, user_id, rand_emb.tolist())
-        except Exception as e:
-            db.rollback()
-            raise Exception(f"Failed to initialize user embedding: {str(e)}")
-        finally:
-            db.close()
-            
-        return UserEmbeddingResponse(success=True, user_id=user_id, message="Random embedding initialized")
-
-    @strawberry.mutation
-    def create_post_embedding(
-        self, 
-        post_id: int, 
-        title: str, 
-        image_urls: list[str] | None = None
-    ) -> EmbeddingResponse:
-        if SessionLocal is None:
-            raise Exception("Database connection is not initialized.")
-            
-        urls = [str(url).strip() for url in image_urls] if image_urls else []
-        embedding = generate_multimodal_embedding(title, urls)
-        
-        db = SessionLocal()
-        try:
-            save_embedding(db, post_id, embedding)
-        except Exception as e:
-            db.rollback()
-            raise Exception(f"Failed to save post embedding: {str(e)}")
-        finally:
-            db.close()
-            
-        return EmbeddingResponse(success=True, post_id=post_id)
-
-    @strawberry.mutation
-    def update_user_embedding(
-        self, 
-        user_id: int, 
-        post_id: int, 
-        view_time: float
-    ) -> UserEmbeddingResponse:
-        if SessionLocal is None:
-            raise Exception("Database connection is not initialized.")
-            
-        db = SessionLocal()
-        try:
-            # 1. Get post embedding
-            post_row = db.execute(
-                text("SELECT embedding FROM post_embeddings WHERE post_id = :post_id"),
-                {"post_id": post_id}
-            ).fetchone()
-            
-            if not post_row:
-                raise Exception(f"Post embedding for post_id {post_id} not found.")
-                
-            post_emb = parse_vector(post_row[0])
-            
-            # 2. Get user embedding
-            user_row = db.execute(
-                text("SELECT embedding FROM user_embeddings WHERE user_id = :user_id"),
-                {"user_id": user_id}
-            ).fetchone()
-            
-            if user_row:
-                user_emb = parse_vector(user_row[0])
-                # Calculate weight from view_time
-                w = min(view_time / 10.0, 2.0)
-                # Incremental weighted update
-                new_emb = user_emb + w * post_emb
-                # Normalize
-                new_emb = new_emb / np.linalg.norm(new_emb)
-            else:
-                # Initialize user with the post embedding directly
-                new_emb = post_emb
-                
-            # 3. Save
-            save_user_embedding(db, user_id, new_emb.tolist())
-            
-        except Exception as e:
-            db.rollback()
-            raise Exception(f"Failed to update user embedding: {str(e)}")
-        finally:
-            db.close()
-            
-        return UserEmbeddingResponse(
-            success=True, 
-            user_id=user_id, 
-            message=f"Updated using post {post_id} with view_time {view_time}s"
+    @strawberry.field
+    def recommend_feed(
+        self,
+        info: Info,
+        user_id: strawberry.ID,
+        skip: int = 0,
+        take: int = 20,
+    ) -> list[RecommendationItem]:
+        operations: RecommendationOperations = info.context["operations"]
+        rows = operations.recommend_feed(
+            int(str(user_id)),
+            skip,
+            take,
+            info.context.get("correlation_id"),
         )
+        return [
+            RecommendationItem(
+                post_id=strawberry.ID(str(row["postId"])),
+                score=row["score"],
+                semantic_score=row["semanticScore"],
+                social_score=row["socialScore"],
+            )
+            for row in rows
+        ]
 
-schema = strawberry.Schema(query=Query, mutation=Mutation)
 
-graphql_app = GraphQLRouter(schema)
+async def graphql_context(
+    request: Request,
+    operations: RecommendationOperations = Depends(get_operations),
+) -> dict:
+    return {
+        "operations": operations,
+        "correlation_id": request.headers.get(CORRELATION_HEADER),
+    }
+
+
+schema = strawberry.Schema(query=Query)
+graphql_app = GraphQLRouter(schema, context_getter=graphql_context)
 app.include_router(graphql_app, prefix="/graphql")

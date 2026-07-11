@@ -1,178 +1,60 @@
-# Recommendation System - Phase 2 (AI-Powered Semantic Recommendation)
+# Recommendation Design
 
-## Overview
+## Ownership
 
-Phase 1 sử dụng Social Graph để tạo danh sách Candidate Posts.
+Recommendation owns only derived vector data and ranking logic:
 
-Candidate được lấy từ:
+- `user_embeddings`: one 512-dimensional preference vector per canonical user ID.
+- `post_embeddings`: one 512-dimensional multimodal vector per canonical post ID.
 
-* Following Posts
-* Popular Posts
-* Recent Posts
+SocialGraph owns users, posts, relationships, blocks, privacy, and candidate generation. Recommendation must not read or write SocialGraph tables directly.
 
-Sau khi có Candidate Posts, hệ thống sử dụng AI Embedding để thực hiện Semantic Re-ranking.
+## Candidate Generation
 
-Mục tiêu:
+For each feed request, Recommendation calls SocialGraph:
 
-Thay vì chỉ đề xuất dựa trên:
+```http
+GET /internal/recommendation/post-candidates?userId={userId}&limit={limit}
+X-Gateway-Secret: <shared secret>
+X-Correlation-ID: <trace id>
+```
 
-* Người dùng đang theo dõi ai
-* Bài viết nào phổ biến
+Candidate records contain `id`, `authorId`, `source`, and `createdAt`. Current source labels and base scores are:
 
-Hệ thống sẽ đề xuất dựa trên:
+| Source | Social score |
+| --- | ---: |
+| `friend` | 1.0 |
+| `followed` | 0.9 |
+| `group` | 0.7 |
+| `recent_public` | 0.3 |
+| unknown | 0.2 |
 
-* Nội dung bài viết
-* Sở thích của người dùng
+SocialGraph is responsible for candidate deduplication and block filtering before returning this pool.
 
----
+## Embeddings
 
-# Database Schema
+Post embeddings combine text and any downloadable image/video media. Models are loaded lazily so health checks and user provisioning do not download model weights.
 
-Phase 2 bổ sung 2 bảng:
+New users receive a normalized deterministic initial vector derived from their canonical ID. This makes retry behavior stable while no interaction-history initializer exists. The endpoint uses idempotent `PUT`, so an existing user vector is not replaced during registration retries.
 
-## post_embeddings
+## Ranking
 
-Lưu vector biểu diễn nội dung bài viết.
+For every candidate with a stored post embedding:
 
-Mỗi bài viết sẽ có một embedding duy nhất được sinh từ:
+```text
+semanticScore = dot(normalizedUserVector, normalizedPostVector)
+socialScore   = scoreByCandidateSource
+score         = 0.6 * semanticScore + 0.4 * socialScore
+```
 
-Title + Content
+Candidates without a post embedding receive `semanticScore = 0` and can still rank by social source. Results are sorted by final score and paginated after ranking.
 
-Ví dụ:
+## Failure Model
 
-Post:
-How to learn React effectively
+- Authentication remains the required registration dependency.
+- User embedding provisioning occurs only after Authentication succeeds.
+- Recommendation provisioning is best-effort from SocialGraph and safe to retry.
+- Recommendation feed errors should not change SocialGraph source data.
+- Internal endpoints fail closed if shared-secret authentication is not configured.
 
-↓
-
-Embedding:
-
-[0.12, -0.45, 0.81, ...]
-
----
-
-## user_embeddings
-
-Lưu vector biểu diễn sở thích của người dùng.
-
-Embedding được tạo từ lịch sử tương tác:
-
-* Follow
-* Reaction
-* Comment
-* Save
-
-được lưu trong bảng Associations.
-
-Ví dụ:
-
-User thích:
-
-* AI
-* Machine Learning
-* Data Science
-
-↓
-
-Embedding:
-
-[0.51, -0.14, 0.22, ...]
-
----
-
-# Recommendation Flow
-
-## Step 1
-
-Candidate Generation
-
-Thuật toán hiện tại thực hiện:
-
-* Following Candidate
-* Popular Candidate
-* Recent Candidate
-
-↓
-
-Merge Candidate Posts
-
-↓
-
-Top 100-300 Candidates
-
----
-
-## Step 2
-
-Load User Embedding
-
-Từ bảng:
-
-user_embeddings
-
----
-
-## Step 3
-
-Load Post Embeddings
-
-Từ bảng:
-
-post_embeddings
-
----
-
-## Step 4
-
-Calculate Semantic Similarity
-
-Semantic Score được tính bằng:
-
-Cosine Similarity
-
-giữa:
-
-User Embedding
-
-và
-
-Post Embedding
-
----
-
-## Step 5
-
-Hybrid Ranking
-
-Final Score được tính:
-
-Final Score =
-0.6 × Semantic Score
-+
-0.4 × Social Score
-
-Trong đó:
-
-Social Score:
-được sinh từ thuật toán recommendation hiện tại.
-
-Semantic Score:
-được sinh từ cosine similarity.
-
----
-
-## Step 6
-
-Sort and Return Feed
-
-Các bài viết được sắp xếp theo:
-
-Final Score DESC
-
-↓
-
-Top 50 Posts
-
-↓
-
-For You Feed
+Durable retry/outbox handling is a later step; current failed best-effort calls are logged with a correlation ID.

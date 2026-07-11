@@ -1,117 +1,98 @@
-import requests
-from io import BytesIO
-from PIL import Image
-import numpy as np
-from sentence_transformers import SentenceTransformer
+from __future__ import annotations
+
 from concurrent.futures import ThreadPoolExecutor
-import cv2
+from functools import lru_cache
+from io import BytesIO
+from typing import Any
+from urllib.parse import urlparse
 
-# Initialize Multilingual CLIP model for text (512 dimensions)
-model = SentenceTransformer("sentence-transformers/clip-ViT-B-32-multilingual-v1")
+import numpy as np
+import requests
 
-# Initialize original CLIP model for images/videos (512 dimensions)
-image_model = SentenceTransformer("clip-ViT-B-32")
 
-def download_image(url: str) -> Image.Image:
-    """Download image from URL and convert to PIL Image"""
+@lru_cache(maxsize=1)
+def _models():
+    from sentence_transformers import SentenceTransformer
+
+    return (
+        SentenceTransformer("sentence-transformers/clip-ViT-B-32-multilingual-v1"),
+        SentenceTransformer("clip-ViT-B-32"),
+    )
+
+
+def _is_http_url(url: str) -> bool:
+    parsed = urlparse(url)
+    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+
+def download_image(url: str) -> Any | None:
+    if not _is_http_url(url):
+        return None
+
+    from PIL import Image
+
     try:
         response = requests.get(url, timeout=10)
         response.raise_for_status()
         return Image.open(BytesIO(response.content)).convert("RGB")
-    except Exception as e:
-        print(f"Error downloading image {url}: {e}")
+    except Exception:
         return None
 
-def extract_video_frames(url: str, interval_seconds: float = 10.0) -> list[Image.Image]:
-    """Stream video from URL and extract frames at regular intervals (default: every 10s)"""
-    frames = []
+
+def extract_video_frames(url: str, interval_seconds: float = 10.0) -> list[Any]:
+    if not _is_http_url(url):
+        return []
+
+    import cv2
+    from PIL import Image
+
+    frames: list[Any] = []
+    capture = cv2.VideoCapture(url)
     try:
-        cap = cv2.VideoCapture(url)
-        if not cap.isOpened():
-            print(f"Warning: Could not open video {url}")
+        if not capture.isOpened():
             return frames
-            
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        # Fallback if FPS is not read correctly
-        if fps <= 0:
-            fps = 25.0
-            
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        frame_step = int(interval_seconds * fps)
-        if frame_step <= 0:
-            frame_step = 1
-            
-        for frame_idx in range(0, total_frames, frame_step):
-            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
-            ret, frame = cap.read()
-            if not ret:
+
+        fps = capture.get(cv2.CAP_PROP_FPS) or 25.0
+        total_frames = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
+        frame_step = max(1, int(interval_seconds * fps))
+
+        for frame_index in range(0, total_frames, frame_step):
+            capture.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
+            success, frame = capture.read()
+            if not success:
                 break
-            # Convert BGR (OpenCV format) to RGB
-            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            pil_img = Image.fromarray(rgb_frame)
-            frames.append(pil_img)
-            
-        cap.release()
-    except Exception as e:
-        print(f"Error extracting frames from video {url}: {e}")
+            frames.append(Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)))
+    finally:
+        capture.release()
+
     return frames
 
-def download_media(url: str) -> list[Image.Image]:
-    """Download media from URL (image or video) and convert to list of PIL Images.
-    If it's an image, returns a list containing 1 PIL Image.
-    If it's a video, extracts frames every 10 seconds and returns a list of PIL Images.
-    """
-    is_video = False
+
+def download_media(url: str) -> list[Any]:
     lower_url = url.lower()
     video_extensions = (".mp4", ".avi", ".mov", ".mkv", ".webm", ".3gp", ".ogg")
-    if any(ext in lower_url for ext in video_extensions):
-        is_video = True
-    else:
-        # Check Content-Type via a quick HEAD request
-        try:
-            head_res = requests.head(url, timeout=5, allow_redirects=True)
-            content_type = head_res.headers.get("Content-Type", "")
-            if "video" in content_type:
-                is_video = True
-        except Exception:
-            pass
+    if any(extension in lower_url for extension in video_extensions):
+        return extract_video_frames(url)
 
-    if is_video:
-        return extract_video_frames(url, interval_seconds=10.0)
-    else:
-        # Treat as image
-        img = download_image(url)
-        return [img] if img else []
+    image = download_image(url)
+    return [image] if image is not None else []
 
-def generate_multimodal_embedding(title: str, image_urls: list = None):
-    # 1. Generate text embedding
-    text_emb = model.encode(title, normalize_embeddings=True)
-    
-    # 2. Generate image / video frame embeddings
-    image_embs = []
-    if image_urls:
-        # Download and process media concurrently
-        with ThreadPoolExecutor(max_workers=min(len(image_urls), 8)) as executor:
-            results = list(executor.map(download_media, image_urls))
-        
-        # Flatten the list of lists of images
-        valid_images = []
-        for img_list in results:
-            for img in img_list:
-                if img is not None:
-                    valid_images.append(img)
-        
-        if valid_images:
-            # Batch encode all valid images/frames
-            image_embs = image_model.encode(valid_images, normalize_embeddings=True)
-                
-    # 3. Fuse Text & Image embeddings
-    if len(image_embs) > 0:
-        mean_image_emb = np.mean(image_embs, axis=0)
-        # Combine: 60% text, 40% image/video mean
-        combined_emb = 0.6 * text_emb + 0.4 * mean_image_emb
-        # Normalize to unit vector
-        combined_emb = combined_emb / np.linalg.norm(combined_emb)
-        return combined_emb.tolist()
-    
-    return text_emb.tolist()
+
+def generate_multimodal_embedding(content: str, media_urls: list[str] | None = None) -> list[float]:
+    text_model, image_model = _models()
+    text_embedding = text_model.encode(content, normalize_embeddings=True)
+
+    valid_images: list[Any] = []
+    urls = [url.strip() for url in media_urls or [] if url.strip()]
+    if urls:
+        with ThreadPoolExecutor(max_workers=min(len(urls), 8)) as executor:
+            for images in executor.map(download_media, urls):
+                valid_images.extend(image for image in images if image is not None)
+
+    if not valid_images:
+        return text_embedding.tolist()
+
+    image_embeddings = image_model.encode(valid_images, normalize_embeddings=True)
+    combined = 0.6 * text_embedding + 0.4 * np.mean(image_embeddings, axis=0)
+    combined = combined / np.linalg.norm(combined)
+    return combined.tolist()

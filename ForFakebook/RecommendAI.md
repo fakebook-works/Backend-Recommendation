@@ -1,188 +1,48 @@
-# Recommendation System - Phase 2 (AI-Powered Semantic Recommendation)
+# Recommendation Module Notes
 
-## Overview
+## Module Responsibilities
 
-Phase 1 sử dụng Social Graph để tạo danh sách Candidate Posts.
+- `EmbeddingModel.py` defines FastAPI middleware, internal REST routes, and the read-only Strawberry schema.
+- `operations.py` validates signed 64-bit IDs and coordinates database/model operations.
+- `database.py` owns SQLAlchemy setup and pgvector serialization.
+- `embedding_service.py` lazily loads the text/image models and creates 512-dimensional vectors.
+- `recommendation_service.py` fetches SocialGraph candidates and applies hybrid ranking.
 
-Candidate được lấy từ:
+Use package imports and start the service with:
 
-* Following Posts
-* Popular Posts
-* Recent Posts
-
-Sau khi có Candidate Posts, hệ thống sử dụng AI Embedding để thực hiện Semantic Re-ranking.
-
-Mục tiêu:
-
-Thay vì chỉ đề xuất dựa trên:
-
-* Người dùng đang theo dõi ai
-* Bài viết nào phổ biến
-
-Hệ thống sẽ đề xuất dựa trên:
-
-* Nội dung bài viết
-* Sở thích của người dùng
-
----
-
-# Database Schema
-
-Phase 2 bổ sung 2 bảng:
-
-## post_embeddings
-
-Lưu vector biểu diễn nội dung bài viết.
-
-Mỗi bài viết sẽ có một embedding duy nhất được sinh từ `Title + Content` (hoặc Content đối với bài viết của Fakebook) kết hợp cùng hình ảnh (Multimodal CLIP).
-
-**Schema:**
-```sql
-CREATE TABLE post_embeddings (
-    post_id BIGINT PRIMARY KEY,
-    embedding VECTOR(512) NOT NULL,
-    created_at TIMESTAMPTZ DEFAULT NOW(),
-    updated_at TIMESTAMPTZ DEFAULT NOW()
-);
+```powershell
+python -m uvicorn ForFakebook.EmbeddingModel:app --port 8000
 ```
 
-Ví dụ:
+Starting `EmbeddingModel.py` as a top-level file is unsupported because the application uses package-relative imports.
 
-Post:
-How to learn React effectively
+## Internal Write Boundary
 
-↓
+Embedding writes are service-to-service operations:
 
-Embedding:
-
-[0.12, -0.45, 0.81, ...]
-
----
-
-## user_embeddings
-
-Lưu vector biểu diễn sở thích của người dùng.
-
-Embedding được tạo từ trung bình cộng các vector bài viết mà người dùng đã tương tác (như React, Comment, Save).
-
-**Schema:**
-```sql
-CREATE TABLE user_embeddings (
-    user_id BIGINT PRIMARY KEY,
-    embedding VECTOR(512) NOT NULL,
-    updated_at TIMESTAMPTZ DEFAULT NOW()
-);
+```text
+PUT    /internal/recommendation/users/{userId}/embedding
+DELETE /internal/recommendation/users/{userId}/embedding
+PUT    /internal/recommendation/posts/{postId}/embedding
+DELETE /internal/recommendation/posts/{postId}/embedding
 ```
 
-Ví dụ:
+All four routes require `X-Gateway-Secret`. User and post IDs are path parameters; post upsert is the only write route with a JSON body.
 
-User thích:
+The GraphQL schema deliberately has no mutation type. This prevents frontend callers from creating or deleting derived vectors directly.
 
-* AI
-* Machine Learning
-* Data Science
+## Model Loading
 
-↓
+Model imports and weights are deferred until a post embedding is requested. Therefore:
 
-Embedding:
+- `/health` does not require model weights.
+- User registration does not load CLIP or SentenceTransformer.
+- Unit tests can validate HTTP and orchestration contracts without downloading production models.
 
-[0.51, -0.14, 0.22, ...]
+## Database Isolation
 
----
+This service queries only `user_embeddings` and `post_embeddings`. Candidate retrieval goes through SocialGraph REST with the same shared secret and correlation ID used by the incoming feed request.
 
-# Recommendation Flow
+## Test Boundary
 
-## Step 1
-
-Candidate Generation
-
-Thuật toán hiện tại thực hiện:
-
-* Following Candidate
-* Popular Candidate
-* Recent Candidate
-
-↓
-
-Merge Candidate Posts
-
-↓
-
-Top 100-300 Candidates
-
----
-
-## Step 2
-
-Load User Embedding
-
-Từ bảng:
-
-user_embeddings
-
----
-
-## Step 3
-
-Load Post Embeddings
-
-Từ bảng:
-
-post_embeddings
-
----
-
-## Step 4
-
-Calculate Semantic Similarity
-
-Semantic Score được tính bằng:
-
-Cosine Similarity
-
-giữa:
-
-User Embedding
-
-và
-
-Post Embedding
-
----
-
-## Step 5
-
-Hybrid Ranking
-
-Final Score được tính:
-
-Final Score =
-0.6 × Semantic Score
-+
-0.4 × Social Score
-
-Trong đó:
-
-Social Score:
-được sinh từ thuật toán recommendation hiện tại.
-
-Semantic Score:
-được sinh từ cosine similarity.
-
----
-
-## Step 6
-
-Sort and Return Feed
-
-Các bài viết được sắp xếp theo:
-
-Final Score DESC
-
-↓
-
-Top 50 Posts
-
-↓
-
-For You Feed
+The automated suite replaces database/model operations at the FastAPI dependency boundary and separately tests candidate request construction and ranking. A deployment smoke test should additionally verify PostgreSQL/pgvector connectivity and one real model inference using deployment-specific model caches.

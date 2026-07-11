@@ -1,55 +1,50 @@
-# Recommendation & Ranking Domain
+# Recommendation Persistence Schema
 
-Tài liệu này giải thích các bảng trong `recommendation_ranking_schema.sql` và cách vận hành hệ gợi ý/xếp hạng.
+This document describes the schema used by the current Recommendation runtime. Candidate sets and ranked lists are computed per request and are not persisted in this version.
 
-## Mục tiêu
-Domain Recommendation & Ranking lưu tập ứng viên (candidate set), điểm số đặc trưng và danh sách xếp hạng cuối cho từng ngữ cảnh (feed, people you may know...).
+## Extension
 
-## Các bảng
+Both schema scripts enable pgvector:
 
-### `fb.rec_candidate_set`
-Một “batch” ứng viên cho 1 user và 1 ngữ cảnh.
-- **set_id**: Khóa chính.
-- **user_id**: Người nhận gợi ý.
-- **context**: Ngữ cảnh (`1=feed`, `2=people_you_may_know`, `3=groups`, `4=pages`).
-- **created_at**: Thời điểm tạo batch.
-- **data**: Metadata (model version, experiment, source).
+```sql
+CREATE EXTENSION IF NOT EXISTS vector;
+```
 
-### `fb.rec_candidate`
-Danh sách ứng viên trong batch.
-- **set_id**: Tham chiếu `rec_candidate_set`.
-- **item_id / item_type**: Đối tượng được đề xuất.
-- **base_score**: Điểm sơ bộ.
-- **features**: JSON chứa feature phục vụ ranking.
+## `user_embeddings`
 
-### `fb.rec_ranked_list`
-Danh sách đã xếp hạng cuối cùng.
-- **list_id**: Khóa chính.
-- **user_id**: Người nhận.
-- **context**: Ngữ cảnh.
-- **created_at**: Thời điểm tạo danh sách.
-- **data**: Metadata (model version, latency, debug info).
+| Column | Type | Meaning |
+| --- | --- | --- |
+| `user_id` | `BIGINT PRIMARY KEY` | Canonical SocialGraph Snowflake ID |
+| `embedding` | `VECTOR(512) NOT NULL` | Current normalized preference vector |
+| `updated_at` | `TIMESTAMPTZ NOT NULL` | Last vector update time |
 
-### `fb.rec_ranked_item`
-Các item trong danh sách xếp hạng.
-- **list_id**: Tham chiếu `rec_ranked_list`.
-- **item_id / item_type**: Đối tượng.
-- **final_score**: Điểm cuối.
-- **rank_pos**: Vị trí xếp hạng.
+Registration uses an idempotent insert: an existing vector is retained on retry.
 
-## Indexes
-- `rec_candidate_user_idx`: Lấy candidate set theo user và thời gian.
-- `rec_ranked_user_idx`: Lấy ranked list theo user và thời gian.
+## `post_embeddings`
 
-## Luồng tiêu biểu
+| Column | Type | Meaning |
+| --- | --- | --- |
+| `post_id` | `BIGINT PRIMARY KEY` | Canonical SocialGraph post ID |
+| `embedding` | `VECTOR(512) NOT NULL` | Multimodal content vector |
+| `created_at` | `TIMESTAMPTZ NOT NULL` | First creation time |
+| `updated_at` | `TIMESTAMPTZ NOT NULL` | Last upsert time |
 
-### Gợi ý feed
-1. Tạo `rec_candidate_set` cho user.
-2. Ghi các candidate vào `rec_candidate` kèm features.
-3. Ranking tạo `rec_ranked_list` + `rec_ranked_item`.
-4. Feed đọc danh sách đã xếp hạng.
+Post creation and update use an upsert keyed by `post_id`.
 
-## Ghi chú triển khai
-- Feature và model version nên lưu trong `data` để truy vết.
-- DB thường chỉ lưu kết quả; pipeline ML xử lý ngoài DB.
+## Runtime Data Flow
 
+1. Candidate IDs and social source labels come from SocialGraph's authenticated internal REST API.
+2. Recommendation selects only embeddings whose `post_id` appears in that candidate set.
+3. Ranking is calculated in memory.
+4. The GraphQL response returns ranked IDs and scores without persisting a ranked-list table.
+
+The old `fb.rec_candidate_set`, `fb.rec_candidate`, `fb.rec_ranked_list`, and `fb.rec_ranked_item` design is not part of the current runtime and must not be treated as a deployed contract.
+
+## Applying the Schema
+
+```powershell
+psql -d fakebook -f .\user_embedding.sql
+psql -d fakebook -f .\post_embedding.sql
+```
+
+Both scripts are idempotent and can be run repeatedly.

@@ -1,61 +1,66 @@
+from __future__ import annotations
+
 import os
+from collections.abc import Sequence
+
 import numpy as np
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 
-# Setup Database connection
+
 DATABASE_URL = os.getenv(
-    "DATABASE_URL", 
-    "postgresql://postgres:postgres@localhost:5432/fakebook"
+    "DATABASE_URL",
+    "postgresql://postgres@localhost:5432/fakebook",
 )
 
 try:
-    engine = create_engine(DATABASE_URL)
+    engine = create_engine(DATABASE_URL, pool_pre_ping=True)
     SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-except Exception as e:
-    print(f"Warning: Database engine connection failed: {e}")
+except Exception:
+    engine = None
     SessionLocal = None
 
-def save_embedding(db, post_id: int, embedding: list):
+
+def vector_literal(values: Sequence[float]) -> str:
+    return "[" + ",".join(format(float(value), ".9g") for value in values) + "]"
+
+
+def save_post_embedding(db, post_id: int, embedding: Sequence[float]) -> None:
     db.execute(
-        text("""
+        text(
+            """
             INSERT INTO post_embeddings (post_id, embedding)
-            VALUES (:post_id, :embedding)
-            ON CONFLICT (post_id) DO UPDATE 
-            SET embedding = EXCLUDED.embedding, updated_at = NOW();
-        """),
-        {
-            "post_id": post_id,
-            "embedding": embedding,
-        }
+            VALUES (:post_id, CAST(:embedding AS vector))
+            ON CONFLICT (post_id) DO UPDATE
+            SET embedding = EXCLUDED.embedding, updated_at = NOW()
+            """
+        ),
+        {"post_id": post_id, "embedding": vector_literal(embedding)},
     )
     db.commit()
 
-def save_user_embedding(db, user_id: int, embedding: list):
-    db.execute(
-        text("""
+
+def create_user_embedding_if_missing(db, user_id: int, embedding: Sequence[float]) -> bool:
+    result = db.execute(
+        text(
+            """
             INSERT INTO user_embeddings (user_id, embedding, updated_at)
-            VALUES (:user_id, :embedding, NOW())
-            ON CONFLICT (user_id) DO UPDATE 
-            SET embedding = EXCLUDED.embedding, updated_at = NOW();
-        """),
-        {
-            "user_id": user_id,
-            "embedding": embedding,
-        }
+            VALUES (:user_id, CAST(:embedding AS vector), NOW())
+            ON CONFLICT (user_id) DO NOTHING
+            """
+        ),
+        {"user_id": user_id, "embedding": vector_literal(embedding)},
     )
     db.commit()
+    return result.rowcount == 1
 
-def parse_vector(val):
-    """Safely parse vector returned from database to a numpy array"""
-    if isinstance(val, str):
-        # Format usually is "[0.1, 0.2, ...]"
-        clean_val = val.strip("[]")
-        if not clean_val:
+
+def parse_vector(value) -> np.ndarray:
+    if isinstance(value, str):
+        clean_value = value.strip("[]")
+        if not clean_value:
             return np.zeros(512)
-        return np.array([float(x) for x in clean_val.split(",")])
-    elif isinstance(val, list):
-        return np.array(val)
-    elif isinstance(val, np.ndarray):
-        return val
-    return np.array(val)
+        return np.array([float(item) for item in clean_value.split(",")])
+    if isinstance(value, (list, tuple, np.ndarray)):
+        return np.asarray(value, dtype=float)
+    return np.asarray(value, dtype=float)

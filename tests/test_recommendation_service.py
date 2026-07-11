@@ -1,0 +1,88 @@
+import numpy as np
+
+from ForFakebook import recommendation_service
+
+
+class FakeResponse:
+    def __init__(self, body):
+        self._body = body
+
+    def raise_for_status(self):
+        return None
+
+    def json(self):
+        return self._body
+
+
+def test_fetch_candidates_uses_socialgraph_internal_contract():
+    captured = {}
+
+    def fake_get(url, **kwargs):
+        captured["url"] = url
+        captured.update(kwargs)
+        return FakeResponse([])
+
+    result = recommendation_service.fetch_post_candidates(
+        9_000_000_000_000_001,
+        200,
+        "http://socialgraph:5223/",
+        "shared-secret-at-least-32-bytes-long",
+        "correlation",
+        fake_get,
+    )
+
+    assert result == []
+    assert captured["url"] == "http://socialgraph:5223/internal/recommendation/post-candidates"
+    assert captured["params"] == {"userId": 9_000_000_000_000_001, "limit": 200}
+    assert captured["headers"]["X-Gateway-Secret"] == "shared-secret-at-least-32-bytes-long"
+    assert captured["headers"]["X-Correlation-ID"] == "correlation"
+    assert captured["timeout"] == 10
+
+
+class FakeResult:
+    def __init__(self, one=None, many=None):
+        self._one = one
+        self._many = many or []
+
+    def fetchone(self):
+        return self._one
+
+    def fetchall(self):
+        return self._many
+
+
+class FakeDb:
+    def execute(self, statement, parameters):
+        sql = str(statement)
+        unit = "[" + ",".join(["1"] + ["0"] * 511) + "]"
+        if "user_embeddings" in sql:
+            return FakeResult(one=(unit,))
+        return FakeResult(
+            many=[
+                (101, unit),
+                (102, "[" + ",".join(["0"] * 512) + "]"),
+            ]
+        )
+
+
+def test_recommend_feed_ranks_socialgraph_candidates(monkeypatch):
+    monkeypatch.setattr(
+        recommendation_service,
+        "fetch_post_candidates",
+        lambda *args, **kwargs: [
+            {"id": 102, "source": "recent_public"},
+            {"id": 101, "source": "friend"},
+        ],
+    )
+
+    result = recommendation_service.recommend_feed_logic(
+        FakeDb(),
+        user_id=1,
+        social_graph_base_url="http://socialgraph",
+        shared_secret="shared-secret-at-least-32-bytes-long",
+        take=2,
+    )
+
+    assert [item["postId"] for item in result] == [101, 102]
+    assert result[0]["semanticScore"] == 1.0
+    assert np.isclose(result[0]["socialScore"], 1.0)

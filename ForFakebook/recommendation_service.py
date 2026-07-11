@@ -1,139 +1,102 @@
-import numpy as np
-from sqlalchemy import text
-from database import parse_vector
+from __future__ import annotations
 
-def recommend_feed_logic(db, user_id: int, skip: int = 0, take: int = 20):
-    # Step 1: Candidate Generation
-    # 1a. Following candidates (author_id is followed by user_id)
-    following_rows = db.execute(
-        text("""
-            SELECT content_id FROM fb.content_post 
-            WHERE author_id IN (
-                SELECT id2 FROM fb.assoc 
-                WHERE id1 = :user_id 
-                  AND assoc_type = 2 
-                  AND is_deleted = false
-            ) AND is_deleted = false
-            ORDER BY created_at DESC LIMIT 100
-        """),
-        {"user_id": user_id}
-    ).fetchall()
-    following_ids = [row[0] for row in following_rows]
-    
-    # 1b. Popular candidates (by likes and comments interaction count)
-    popular_rows = db.execute(
-        text("""
-            SELECT id2 AS content_id, COUNT(*) AS interaction_count
-            FROM fb.assoc_inverse
-            WHERE id2_type = 3
-              AND assoc_type IN (3, 5)
-              AND is_deleted = false
-            GROUP BY id2
-            ORDER BY interaction_count DESC LIMIT 100
-        """)
-    ).fetchall()
-    popular_ids = [row[0] for row in popular_rows]
-    popular_counts = {row[0]: row[1] for row in popular_rows}
-    
-    # 1c. Recent candidates
-    recent_rows = db.execute(
-        text("""
-            SELECT content_id FROM fb.content_post 
-            WHERE is_deleted = false 
-            ORDER BY created_at DESC LIMIT 100
-        """)
-    ).fetchall()
-    recent_ids = [row[0] for row in recent_rows]
-    
-    # Merge candidates (remove duplicates)
-    candidate_ids = list(set(following_ids + popular_ids + recent_ids))
+from collections.abc import Callable
+
+import numpy as np
+import requests
+from sqlalchemy import text
+
+from .database import parse_vector
+
+
+SOURCE_SCORES = {
+    "friend": 1.0,
+    "followed": 0.9,
+    "group": 0.7,
+    "recent_public": 0.3,
+}
+
+
+def fetch_post_candidates(
+    user_id: int,
+    limit: int,
+    social_graph_base_url: str,
+    shared_secret: str,
+    correlation_id: str | None = None,
+    http_get: Callable = requests.get,
+) -> list[dict]:
+    headers = {"X-Gateway-Secret": shared_secret}
+    if correlation_id:
+        headers["X-Correlation-ID"] = correlation_id
+
+    response = http_get(
+        f"{social_graph_base_url.rstrip('/')}/internal/recommendation/post-candidates",
+        params={"userId": user_id, "limit": limit},
+        headers=headers,
+        timeout=10,
+    )
+    response.raise_for_status()
+    return response.json()
+
+
+def recommend_feed_logic(
+    db,
+    user_id: int,
+    social_graph_base_url: str,
+    shared_secret: str,
+    skip: int = 0,
+    take: int = 20,
+    correlation_id: str | None = None,
+) -> list[dict]:
+    normalized_skip = max(0, skip)
+    normalized_take = min(max(1, take), 100)
+    candidates = fetch_post_candidates(
+        user_id,
+        min(500, normalized_skip + normalized_take + 200),
+        social_graph_base_url,
+        shared_secret,
+        correlation_id,
+    )
+    candidate_ids = [int(candidate["id"]) for candidate in candidates]
     if not candidate_ids:
         return []
-        
-    candidate_ids = candidate_ids[:300]
-    
-    # Step 2: Load User Embedding
+
     user_row = db.execute(
         text("SELECT embedding FROM user_embeddings WHERE user_id = :user_id"),
-        {"user_id": user_id}
+        {"user_id": user_id},
     ).fetchone()
-    
-    if user_row:
-        user_emb = parse_vector(user_row[0])
-    else:
-        # Default fallback to random vector
-        user_emb = np.random.randn(512)
-        user_emb = user_emb / np.linalg.norm(user_emb)
-        
-    # Step 3: Load Post Embeddings
+    user_embedding = parse_vector(user_row[0]) if user_row else np.zeros(512)
+
     post_rows = db.execute(
-        text("SELECT post_id, embedding FROM post_embeddings WHERE post_id = ANY(:candidate_ids)"),
-        {"candidate_ids": candidate_ids}
+        text(
+            """
+            SELECT post_id, embedding
+            FROM post_embeddings
+            WHERE post_id = ANY(:candidate_ids)
+            """
+        ),
+        {"candidate_ids": candidate_ids},
     ).fetchall()
-    
-    post_embs = {}
-    for row in post_rows:
-        post_embs[row[0]] = parse_vector(row[1])
-        
-    # Step 4 & 5: Calculate Semantic Similarity & Social / Hybrid Ranking
-    ranked_posts = []
-    for pid in candidate_ids:
-        p_emb = post_embs.get(pid)
-        if p_emb is not None:
-            # Vectors are L2 normalized, so Cosine Similarity is simple dot product
-            semantic_score = float(np.dot(user_emb, p_emb))
-        else:
-            semantic_score = 0.0
-            
-        # Social Score
-        # Boost if author is followed (+1.0)
-        is_following = 1.0 if pid in following_ids else 0.0
-        # Add interaction popularity normalized (capped at 50 likes/comments = 1.0)
-        interaction_cnt = popular_counts.get(pid, 0)
-        popularity_score = min(interaction_cnt / 50.0, 1.0)
-        
-        social_score = 0.6 * is_following + 0.4 * popularity_score
-        
-        # Hybrid score: 0.6 * semantic + 0.4 * social
+    post_embeddings = {int(row[0]): parse_vector(row[1]) for row in post_rows}
+
+    ranked: list[dict] = []
+    for candidate in candidates:
+        post_id = int(candidate["id"])
+        post_embedding = post_embeddings.get(post_id)
+        semantic_score = 0.0
+        if post_embedding is not None and np.linalg.norm(user_embedding) > 0:
+            semantic_score = float(np.dot(user_embedding, post_embedding))
+
+        social_score = SOURCE_SCORES.get(str(candidate.get("source", "")), 0.2)
         final_score = 0.6 * semantic_score + 0.4 * social_score
-        
-        ranked_posts.append({
-            "postId": pid,
-            "score": final_score,
-            "semanticScore": semantic_score,
-            "socialScore": social_score
-        })
-        
-    # Step 6: Sort and Return Top Posts
-    ranked_posts.sort(key=lambda x: x["score"], reverse=True)
-    paginated_posts = ranked_posts[skip:skip+take]
-    
-    # Save log outputs to rec_ranked_list and rec_ranked_item
-    try:
-        list_id = int(np.random.randint(1, 1000000000))
-        db.execute(
-            text("""
-                INSERT INTO fb.rec_ranked_list (list_id, user_id, context, created_at)
-                VALUES (:list_id, :user_id, 1, NOW())
-            """),
-            {"list_id": list_id, "user_id": user_id}
+        ranked.append(
+            {
+                "postId": post_id,
+                "score": final_score,
+                "semanticScore": semantic_score,
+                "socialScore": social_score,
+            }
         )
-        for idx, post in enumerate(paginated_posts):
-            db.execute(
-                text("""
-                    INSERT INTO fb.rec_ranked_item (list_id, item_id, item_type, final_score, rank_pos)
-                    VALUES (:list_id, :item_id, 3, :final_score, :rank_pos)
-                """),
-                {
-                    "list_id": list_id,
-                    "item_id": post["postId"],
-                    "final_score": post["score"],
-                    "rank_pos": skip + idx + 1
-                }
-            )
-        db.commit()
-    except Exception as e:
-        print(f"Warning: Failed to save ranked list logs: {e}")
-        db.rollback()
-        
-    return paginated_posts
+
+    ranked.sort(key=lambda item: item["score"], reverse=True)
+    return ranked[normalized_skip : normalized_skip + normalized_take]
