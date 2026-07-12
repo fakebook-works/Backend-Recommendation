@@ -6,7 +6,7 @@
 - `operations.py` validates signed 64-bit IDs and coordinates database/model operations.
 - `database.py` owns SQLAlchemy setup and pgvector serialization.
 - `embedding_service.py` lazily loads the text/image models and creates 512-dimensional vectors.
-- `recommendation_service.py` fetches SocialGraph candidates and applies hybrid ranking.
+- `recommendation_service.py` fetches validated SocialGraph candidate IDs and applies semantic ranking.
 
 Use package imports and start the service with:
 
@@ -29,7 +29,7 @@ DELETE /internal/recommendation/posts/{postId}/embedding
 
 All four routes require `X-Gateway-Secret`. User and post IDs are path parameters; post upsert is the only write route with a JSON body.
 
-The GraphQL schema deliberately has no mutation type. This prevents frontend callers from creating or deleting derived vectors directly.
+The GraphQL schema deliberately has no mutation type. This prevents frontend callers from creating or deleting derived vectors directly. `recommendFeed` additionally requires a valid Gateway secret and an `X-User-Id` matching its `userId` argument.
 
 ## Model Loading
 
@@ -41,7 +41,7 @@ Model imports and weights are deferred until a post embedding is requested. Ther
 
 ## Database Isolation
 
-This service queries only `user_embeddings` and `post_embeddings`. Candidate retrieval goes through SocialGraph REST with the same shared secret and correlation ID used by the incoming feed request.
+This service queries only `user_embeddings` and `post_embeddings`. Candidate retrieval uses SocialGraph's `GET /internal/recommendation/post-candidate-ids` ID-only contract with the same shared secret and correlation ID used by the incoming feed request. Post hydration remains in SocialGraph and is composed by Fusion.
 
 ## Test Boundary
 

@@ -20,7 +20,7 @@ ForFakebook/
   operations.py              Application operations and validation
   database.py                SQLAlchemy session and pgvector persistence
   embedding_service.py       Lazy-loaded text/image/video embedding models
-  recommendation_service.py Candidate retrieval and hybrid ranking
+  recommendation_service.py Candidate-ID retrieval and semantic ranking
 tests/                       Automated contract and ranking tests
 user_embedding.sql           Idempotent user embedding schema
 post_embedding.sql           Idempotent post embedding schema
@@ -60,7 +60,7 @@ $env:INTERNAL_SHARED_SECRET="replace-with-at-least-32-bytes"
 $env:SOCIAL_GRAPH_BASE_URL="http://localhost:5223"
 ```
 
-`INTERNAL_SHARED_SECRET` must match SocialGraph's `Gateway:InternalSharedSecret`. Every `/internal/*` request requires:
+`INTERNAL_SHARED_SECRET` must match Gateway and SocialGraph. Every `/internal/*` request requires:
 
 ```http
 X-Gateway-Secret: <shared secret>
@@ -114,13 +114,20 @@ The model is loaded lazily on the first post embedding request. `PUT` upserts th
 
 Endpoint: `POST /graphql`
 
+`recommendFeed` is viewer-specific. Gateway must send headers generated from the validated session; frontend must never provide these trusted headers directly:
+
+```http
+X-Gateway-Secret: <shared secret at least 32 bytes>
+X-User-Id: <authenticated user ID>
+X-Correlation-ID: <trace ID>
+```
+
+The `userId` argument must match `X-User-Id`.
+
 ```graphql
 query RecommendedFeed($userId: ID!, $skip: Int!, $take: Int!) {
   recommendFeed(userId: $userId, skip: $skip, take: $take) {
     postId
-    score
-    semanticScore
-    socialScore
   }
 }
 ```
@@ -135,15 +142,16 @@ Example variables:
 }
 ```
 
-There is no GraphQL mutation for embedding writes. SocialGraph calls the internal REST endpoints instead.
+The public result deliberately contains only ranked `postId` values. Ranking diagnostics are internal implementation details, not a frontend contract. In the composed Gateway schema, each item also has SocialGraph's nullable `post` field, including group metadata for `GroupPostDetail`. There is no GraphQL mutation for embedding writes.
 
 ## Candidate and Ranking Flow
 
-1. Recommendation calls `GET {SOCIAL_GRAPH_BASE_URL}/internal/recommendation/post-candidates?userId=...&limit=...` with the shared secret.
-2. SocialGraph returns deduplicated candidate IDs with source labels such as `friend`, `followed`, `group`, and `recent_public`.
+1. Recommendation calls `GET {SOCIAL_GRAPH_BASE_URL}/internal/recommendation/post-candidate-ids?userId=...&limit=...` with the shared secret and correlation ID.
+2. SocialGraph returns a deduplicated JSON array of positive signed 64-bit post IDs after privacy and block filtering.
 3. Recommendation loads the user's vector and available candidate post vectors from its own database.
-4. It calculates cosine similarity and combines it with the source score: `0.6 * semanticScore + 0.4 * socialScore`.
-5. It sorts descending and applies bounded pagination (`take` from 1 to 100).
+4. It ranks by semantic dot product. Candidates without a stored embedding receive score `0`; Python's stable sort preserves SocialGraph order for ties.
+5. It applies bounded offset pagination (`skip >= 0`, `take` clamped to `1..100`) and returns only IDs.
+6. Fusion uses SocialGraph's internal `RecommendationItem` lookup to batch-hydrate `post`; deleted or newly unauthorized posts become `post: null`.
 
 ## Registration Integration
 
@@ -168,4 +176,4 @@ python -m pip install -r requirements-test.txt
 python -m pytest -q
 ```
 
-The suite covers internal authentication, fail-closed configuration, correlation propagation, Snowflake IDs, idempotent user creation, canonical post/delete contracts, GraphQL ID serialization, removal of public write mutations, SocialGraph candidate request headers, and ranking order.
+The suite covers internal authentication, fail-closed configuration, correlation propagation, Snowflake IDs, idempotent user creation, canonical post/delete contracts, trusted GraphQL viewer enforcement, ID-only schema output, SocialGraph candidate request validation/deduplication, and semantic ranking order.

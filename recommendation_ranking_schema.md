@@ -33,10 +33,11 @@ Post creation and update use an upsert keyed by `post_id`.
 
 ## Runtime Data Flow
 
-1. Candidate IDs and social source labels come from SocialGraph's authenticated internal REST API.
+1. Candidate IDs come from SocialGraph's authenticated ID-only `post-candidate-ids` REST API.
 2. Recommendation selects only embeddings whose `post_id` appears in that candidate set.
 3. Ranking is calculated in memory.
-4. The GraphQL response returns ranked IDs and scores without persisting a ranked-list table.
+4. The GraphQL response returns ranked IDs only, without persisting a ranked-list table or exposing internal scores.
+5. Gateway Fusion hydrates each ranked item through SocialGraph; hydration is not persisted by Recommendation.
 
 The old `fb.rec_candidate_set`, `fb.rec_candidate`, `fb.rec_ranked_list`, and `fb.rec_ranked_item` design is not part of the current runtime and must not be treated as a deployed contract.
 

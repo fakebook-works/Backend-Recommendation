@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 from ForFakebook.EmbeddingModel import (
     CORRELATION_HEADER,
     INTERNAL_SECRET_HEADER,
+    USER_ID_HEADER,
     app,
 )
 from ForFakebook.operations import get_operations
@@ -40,9 +41,6 @@ class FakeOperations:
         return [
             {
                 "postId": SNOWFLAKE_ID + 1,
-                "score": 0.8,
-                "semanticScore": 0.7,
-                "socialScore": 0.95,
             }
         ]
 
@@ -146,15 +144,60 @@ def test_graphql_recommend_feed_uses_id_scalar_for_snowflakes(api):
     response = client.post(
         "/graphql",
         json={
-            "query": "query Feed($userId: ID!) { recommendFeed(userId: $userId) { postId score } }",
+            "query": "query Feed($userId: ID!) { recommendFeed(userId: $userId) { postId } }",
             "variables": {"userId": str(SNOWFLAKE_ID)},
         },
-        headers={CORRELATION_HEADER: "feed-correlation"},
+        headers={
+            CORRELATION_HEADER: "feed-correlation",
+            INTERNAL_SECRET_HEADER: SHARED_SECRET,
+            USER_ID_HEADER: str(SNOWFLAKE_ID),
+        },
     )
 
     assert response.status_code == 200
     assert response.json()["data"]["recommendFeed"][0]["postId"] == str(SNOWFLAKE_ID + 1)
     assert fake.calls[-1] == ("recommend", SNOWFLAKE_ID, 0, 20, "feed-correlation")
+
+
+def test_graphql_recommend_feed_rejects_missing_or_mismatched_trusted_user(api):
+    client, fake = api
+    query = "query Feed($userId: ID!) { recommendFeed(userId: $userId) { postId } }"
+
+    missing = client.post(
+        "/graphql",
+        json={"query": query, "variables": {"userId": str(SNOWFLAKE_ID)}},
+        headers={INTERNAL_SECRET_HEADER: SHARED_SECRET},
+    )
+    mismatched = client.post(
+        "/graphql",
+        json={"query": query, "variables": {"userId": str(SNOWFLAKE_ID)}},
+        headers={
+            INTERNAL_SECRET_HEADER: SHARED_SECRET,
+            USER_ID_HEADER: str(SNOWFLAKE_ID + 1),
+        },
+    )
+
+    assert missing.json()["errors"][0]["extensions"]["code"] == "UNAUTHENTICATED"
+    assert mismatched.json()["errors"][0]["extensions"]["code"] == "FORBIDDEN"
+    assert not any(call[0] == "recommend" for call in fake.calls)
+
+
+def test_graphql_recommend_feed_rejects_non_numeric_user_id(api):
+    client, fake = api
+
+    response = client.post(
+        "/graphql",
+        json={
+            "query": "query { recommendFeed(userId: \"not-a-number\") { postId } }",
+        },
+        headers={
+            INTERNAL_SECRET_HEADER: SHARED_SECRET,
+            USER_ID_HEADER: "1",
+        },
+    )
+
+    assert response.json()["errors"][0]["extensions"]["code"] == "BAD_USER_INPUT"
+    assert not any(call[0] == "recommend" for call in fake.calls)
 
 
 def test_graphql_has_no_embedding_mutation_surface(api):

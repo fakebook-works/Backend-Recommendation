@@ -14,22 +14,12 @@ SocialGraph owns users, posts, relationships, blocks, privacy, and candidate gen
 For each feed request, Recommendation calls SocialGraph:
 
 ```http
-GET /internal/recommendation/post-candidates?userId={userId}&limit={limit}
+GET /internal/recommendation/post-candidate-ids?userId={userId}&limit={limit}
 X-Gateway-Secret: <shared secret>
 X-Correlation-ID: <trace id>
 ```
 
-Candidate records contain `id`, `authorId`, `source`, and `createdAt`. Current source labels and base scores are:
-
-| Source | Social score |
-| --- | ---: |
-| `friend` | 1.0 |
-| `followed` | 0.9 |
-| `group` | 0.7 |
-| `recent_public` | 0.3 |
-| unknown | 0.2 |
-
-SocialGraph is responsible for candidate deduplication and block filtering before returning this pool.
+Response la JSON array ID-only, vi du `[789, 788, 777]`. SocialGraph chiu trach nhiem social source selection, deduplication, privacy va block filtering truoc khi tra pool. Recommendation validate moi ID la positive signed 64-bit va khong phu thuoc vao source label.
 
 ## Embeddings
 
@@ -43,11 +33,11 @@ For every candidate with a stored post embedding:
 
 ```text
 semanticScore = dot(normalizedUserVector, normalizedPostVector)
-socialScore   = scoreByCandidateSource
-score         = 0.6 * semanticScore + 0.4 * socialScore
 ```
 
-Candidates without a post embedding receive `semanticScore = 0` and can still rank by social source. Results are sorted by final score and paginated after ranking.
+Candidates without a post embedding receive `semanticScore = 0`. Results are stable-sorted by semantic score, paginated after ranking, and GraphQL returns only `postId`; score fields are not a public contract.
+
+Gateway Fusion uses SocialGraph's internal `RecommendationItem(postId)` lookup to add nullable `post: HomePost` to each item. SocialGraph performs a batched authorization-aware read and returns group metadata for group posts.
 
 ## Failure Model
 
@@ -56,5 +46,6 @@ Candidates without a post embedding receive `semanticScore = 0` and can still ra
 - Recommendation provisioning is best-effort from SocialGraph and safe to retry.
 - Recommendation feed errors should not change SocialGraph source data.
 - Internal endpoints fail closed if shared-secret authentication is not configured.
+- `recommendFeed` requires matching trusted `X-Gateway-Secret`, `X-User-Id`, and `userId` argument.
 
 Durable retry/outbox handling is a later step; current failed best-effort calls are logged with a correlation ID.
