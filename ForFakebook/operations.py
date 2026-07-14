@@ -38,8 +38,8 @@ class RecommendationOperations:
 
     def upsert_post_embedding(self, post_id: int, content: str, media_urls: list[str]) -> None:
         self._validate_id(post_id, "post_id")
-        if not content.strip():
-            raise ValueError("content is required")
+        if not content.strip() and not any(url.strip() for url in media_urls):
+            raise ValueError("content or at least one media URL is required")
 
         embedding = self._embedding_generator(content, media_urls)
         with self._session() as db:

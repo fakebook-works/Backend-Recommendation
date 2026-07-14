@@ -27,7 +27,8 @@ PUT    /internal/recommendation/posts/{postId}/embedding
 DELETE /internal/recommendation/posts/{postId}/embedding
 ```
 
-All four routes require `X-Gateway-Secret`. User and post IDs are path parameters; post upsert is the only write route with a JSON body.
+All four routes require `X-Internal-RecommendationService-Secret`. User and post IDs
+are path parameters; post upsert is the only write route with a JSON body.
 
 The GraphQL schema deliberately has no mutation type. This prevents frontend callers from creating or deleting derived vectors directly. `recommendFeed` additionally requires a valid Gateway secret and an `X-User-Id` matching its `userId` argument.
 
@@ -41,7 +42,11 @@ Model imports and weights are deferred until a post embedding is requested. Ther
 
 ## Database Isolation
 
-This service queries only `user_embeddings` and `post_embeddings`. Candidate retrieval uses SocialGraph's `GET /internal/recommendation/post-candidate-ids` ID-only contract with the same shared secret and correlation ID used by the incoming feed request. Post hydration remains in SocialGraph and is composed by Fusion.
+This service queries only `user_embeddings` and `post_embeddings`. Candidate
+retrieval uses SocialGraph's `GET /internal/recommendation/post-candidate-ids`
+ID-only contract. Its outbound credential is separate from the
+`SOCIAL_GRAPH_SERVICE_SECRET` used by SocialGraph when calling Recommendation.
+Post hydration remains in SocialGraph and is composed by Fusion.
 
 ## Test Boundary
 

@@ -8,7 +8,7 @@ import strawberry
 from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse
 from graphql import GraphQLError
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from strawberry.fastapi import GraphQLRouter
 from strawberry.types import Info
 
@@ -19,7 +19,8 @@ from .operations import (
 )
 
 
-INTERNAL_SECRET_HEADER = "X-Gateway-Secret"
+GATEWAY_SECRET_HEADER = "X-Gateway-Secret"
+SOCIAL_GRAPH_SECRET_HEADER = "X-Internal-RecommendationService-Secret"
 CORRELATION_HEADER = "X-Correlation-ID"
 USER_ID_HEADER = "X-User-Id"
 MAX_SIGNED_64_BIT_ID = 9_223_372_036_854_775_807
@@ -32,15 +33,15 @@ async def internal_security_and_correlation(request: Request, call_next):
     correlation_id = request.headers.get(CORRELATION_HEADER) or uuid.uuid4().hex
 
     if request.url.path == "/internal" or request.url.path.startswith("/internal/"):
-        expected_secret = os.getenv("INTERNAL_SHARED_SECRET", "")
-        provided_secret = request.headers.get(INTERNAL_SECRET_HEADER, "")
+        expected_secret = os.getenv("SOCIAL_GRAPH_SERVICE_SECRET", "")
+        provided_secret = request.headers.get(SOCIAL_GRAPH_SECRET_HEADER, "")
         if len(expected_secret.encode("utf-8")) < 32:
             response = JSONResponse(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 content={
                     "error": {
-                        "code": "INTERNAL_AUTH_NOT_CONFIGURED",
-                        "message": "Internal service authentication is not configured.",
+                        "code": "SOCIAL_GRAPH_AUTH_NOT_CONFIGURED",
+                        "message": "SocialGraph service authentication is not configured.",
                     }
                 },
             )
@@ -69,8 +70,14 @@ async def internal_security_and_correlation(request: Request, call_next):
 
 
 class PostEmbeddingRequest(BaseModel):
-    content: str = Field(min_length=1, max_length=50_000)
+    content: str = Field(default="", max_length=50_000)
     mediaUrls: list[str] = Field(default_factory=list, max_length=100)
+
+    @model_validator(mode="after")
+    def require_content_or_media(self):
+        if not self.content.strip() and not any(url.strip() for url in self.mediaUrls):
+            raise ValueError("content or at least one media URL is required")
+        return self
 
 
 class UserEmbeddingPayload(BaseModel):
@@ -227,7 +234,7 @@ def _require_trusted_viewer(info: Info, requested_user_id: int) -> None:
             extensions={"code": "SERVICE_UNAVAILABLE"},
         )
 
-    provided_secret = request.headers.get(INTERNAL_SECRET_HEADER, "")
+    provided_secret = request.headers.get(GATEWAY_SECRET_HEADER, "")
     if not hmac.compare_digest(
         expected_secret.encode("utf-8"),
         provided_secret.encode("utf-8"),

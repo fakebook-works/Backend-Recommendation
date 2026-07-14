@@ -6,6 +6,7 @@ SQLAlchemy>=2.0,<3
 psycopg2-binary>=2.9,<3
 numpy>=2.0,<3
 requests>=2.32,<3
+python-dotenv>=1.0,<2
 Pillow>=11,<13
 opencv-python-headless>=4.10,<5
 sentence-transformers>=3.4,<6

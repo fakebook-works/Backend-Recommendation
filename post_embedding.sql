@@ -1,11 +1,11 @@
-CREATE EXTENSION IF NOT EXISTS vector;
+CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public;
 
-CREATE TABLE IF NOT EXISTS post_embeddings (
+CREATE SCHEMA IF NOT EXISTS recommendation;
+
+CREATE TABLE IF NOT EXISTS recommendation.post_embeddings (
     post_id BIGINT PRIMARY KEY,
-    embedding VECTOR(512) NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    embedding public.vector(512) NOT NULL
 );
 
-COMMENT ON TABLE post_embeddings IS
+COMMENT ON TABLE recommendation.post_embeddings IS
 'Stores multimodal post embeddings owned by Recommendation';

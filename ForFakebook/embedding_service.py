@@ -80,7 +80,12 @@ def download_media(url: str) -> list[Any]:
 
 def generate_multimodal_embedding(content: str, media_urls: list[str] | None = None) -> list[float]:
     text_model, image_model = _models()
-    text_embedding = text_model.encode(content, normalize_embeddings=True)
+    text_embedding = None
+    if content.strip():
+        text_embedding = np.asarray(
+            text_model.encode(content, normalize_embeddings=True),
+            dtype=float,
+        )
 
     valid_images: list[Any] = []
     urls = [url.strip() for url in media_urls or [] if url.strip()]
@@ -90,9 +95,18 @@ def generate_multimodal_embedding(content: str, media_urls: list[str] | None = N
                 valid_images.extend(image for image in images if image is not None)
 
     if not valid_images:
+        if text_embedding is None:
+            raise ValueError("content is empty and no media could be processed")
         return text_embedding.tolist()
 
     image_embeddings = image_model.encode(valid_images, normalize_embeddings=True)
-    combined = 0.6 * text_embedding + 0.4 * np.mean(image_embeddings, axis=0)
+    media_embedding = np.mean(np.asarray(image_embeddings, dtype=float), axis=0)
+    if text_embedding is None:
+        norm = np.linalg.norm(media_embedding)
+        if norm == 0:
+            raise ValueError("media embedding has zero magnitude")
+        return (media_embedding / norm).tolist()
+
+    combined = 0.6 * text_embedding + 0.4 * media_embedding
     combined = combined / np.linalg.norm(combined)
     return combined.tolist()

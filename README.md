@@ -55,19 +55,26 @@ Both tables use `vector(512)` and a `BIGINT` primary key.
 Set configuration through environment variables. Do not commit production secrets.
 
 ```powershell
-$env:DATABASE_URL="postgresql://postgres:postgres@localhost:5432/fakebook"
+$env:DATABASE_URL="postgresql://fakebook:<password>@<host>:5432/fakebook?options=-csearch_path%3Drecommendation%2Cpublic"
 $env:INTERNAL_SHARED_SECRET="replace-with-at-least-32-bytes"
+$env:SOCIAL_GRAPH_SERVICE_SECRET="replace-with-a-different-secret-at-least-32-bytes"
 $env:SOCIAL_GRAPH_BASE_URL="http://localhost:5223"
 ```
 
-`INTERNAL_SHARED_SECRET` must match Gateway and SocialGraph. Every `/internal/*` request requires:
+Recommendation tables live in the `recommendation` PostgreSQL schema. Keep the
+password in environment configuration and never commit it to the repository.
+
+`INTERNAL_SHARED_SECRET` authenticates Gateway requests to public GraphQL.
+`SOCIAL_GRAPH_SERVICE_SECRET` is a separate credential for SocialGraph calls to
+the internal embedding REST API. Every `/internal/*` request requires:
 
 ```http
-X-Gateway-Secret: <shared secret>
+X-Internal-RecommendationService-Secret: <SocialGraph-to-Recommendation secret>
 X-Correlation-ID: <optional trace id>
 ```
 
-The service returns `403` for a missing or invalid secret and fails closed with `503` when the server secret is shorter than 32 bytes.
+The service returns `403` for a missing or invalid SocialGraph secret and fails
+closed with `503` when the configured secret is shorter than 32 bytes.
 
 ## Run
 
@@ -99,7 +106,7 @@ PUT /internal/recommendation/posts/{postId}/embedding
 Content-Type: application/json
 
 {
-  "content": "Post text",
+  "content": "Post text or an empty string for media-only posts",
   "mediaUrls": ["https://example.com/photo.jpg"]
 }
 ```
@@ -108,7 +115,10 @@ Content-Type: application/json
 DELETE /internal/recommendation/posts/{postId}/embedding
 ```
 
-The model is loaded lazily on the first post embedding request. `PUT` upserts the row; `DELETE` is idempotent and returns `204`.
+At least one non-blank `content` value or media URL is required. Media-only posts
+use the processed media embedding without an empty-text contribution. The model
+is loaded lazily on the first post embedding request. `PUT` upserts the row;
+`DELETE` is idempotent and returns `204`.
 
 ## GraphQL
 
@@ -146,7 +156,7 @@ The public result deliberately contains only ranked `postId` values. Ranking dia
 
 ## Candidate and Ranking Flow
 
-1. Recommendation calls `GET {SOCIAL_GRAPH_BASE_URL}/internal/recommendation/post-candidate-ids?userId=...&limit=...` with the shared secret and correlation ID.
+1. Recommendation calls `GET {SOCIAL_GRAPH_BASE_URL}/internal/recommendation/post-candidate-ids?userId=...&limit=...` with the current outbound candidate credential and correlation ID. This credential is separate from `SOCIAL_GRAPH_SERVICE_SECRET`.
 2. SocialGraph returns a deduplicated JSON array of positive signed 64-bit post IDs after privacy and block filtering.
 3. Recommendation loads the user's vector and available candidate post vectors from its own database.
 4. It ranks by semantic dot product. Candidates without a stored embedding receive score `0`; Python's stable sort preserves SocialGraph order for ties.

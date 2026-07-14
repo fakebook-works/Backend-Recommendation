@@ -5,14 +5,16 @@ from fastapi.testclient import TestClient
 
 from ForFakebook.EmbeddingModel import (
     CORRELATION_HEADER,
-    INTERNAL_SECRET_HEADER,
+    GATEWAY_SECRET_HEADER,
+    SOCIAL_GRAPH_SECRET_HEADER,
     USER_ID_HEADER,
     app,
 )
 from ForFakebook.operations import get_operations
 
 
-SHARED_SECRET = "recommendation-test-shared-secret-at-least-32-bytes"
+GATEWAY_SHARED_SECRET = "gateway-test-shared-secret-at-least-32-bytes"
+SOCIAL_GRAPH_SHARED_SECRET = "social-graph-test-shared-secret-at-least-32-bytes"
 SNOWFLAKE_ID = 9_000_000_000_000_001
 
 
@@ -48,7 +50,8 @@ class FakeOperations:
 @pytest.fixture()
 def api(monkeypatch):
     fake = FakeOperations()
-    monkeypatch.setenv("INTERNAL_SHARED_SECRET", SHARED_SECRET)
+    monkeypatch.setenv("INTERNAL_SHARED_SECRET", GATEWAY_SHARED_SECRET)
+    monkeypatch.setenv("SOCIAL_GRAPH_SERVICE_SECRET", SOCIAL_GRAPH_SHARED_SECRET)
     app.dependency_overrides[get_operations] = lambda: fake
     with TestClient(app) as client:
         yield client, fake
@@ -56,7 +59,7 @@ def api(monkeypatch):
 
 
 def internal_headers(correlation_id=None):
-    headers = {INTERNAL_SECRET_HEADER: SHARED_SECRET}
+    headers = {SOCIAL_GRAPH_SECRET_HEADER: SOCIAL_GRAPH_SHARED_SECRET}
     if correlation_id:
         headers[CORRELATION_HEADER] = correlation_id
     return headers
@@ -67,8 +70,13 @@ def test_internal_routes_reject_missing_and_invalid_secret(api):
     path = f"/internal/recommendation/users/{SNOWFLAKE_ID}/embedding"
 
     assert client.put(path).status_code == 403
-    assert client.put(path, headers={INTERNAL_SECRET_HEADER: "wrong"}).status_code == 403
-    assert client.put(path, headers={INTERNAL_SECRET_HEADER: b"\xffinvalid"}).status_code == 403
+    assert client.put(path, headers={SOCIAL_GRAPH_SECRET_HEADER: "wrong"}).status_code == 403
+    assert client.put(path, headers={SOCIAL_GRAPH_SECRET_HEADER: b"\xffinvalid"}).status_code == 403
+    assert client.put(
+        path,
+        headers={"X-Internal-SocialGraphService-Secret": SOCIAL_GRAPH_SHARED_SECRET},
+    ).status_code == 403
+    assert client.put(path, headers={GATEWAY_SECRET_HEADER: GATEWAY_SHARED_SECRET}).status_code == 403
 
 
 def test_internal_auth_matches_path_segment_only(api):
@@ -82,15 +90,15 @@ def test_internal_auth_matches_path_segment_only(api):
 
 def test_internal_routes_fail_closed_when_secret_is_not_configured(api, monkeypatch):
     client, _ = api
-    monkeypatch.delenv("INTERNAL_SHARED_SECRET", raising=False)
+    monkeypatch.delenv("SOCIAL_GRAPH_SERVICE_SECRET", raising=False)
 
     response = client.put(
         f"/internal/recommendation/users/{SNOWFLAKE_ID}/embedding",
-        headers={INTERNAL_SECRET_HEADER: SHARED_SECRET},
+        headers={SOCIAL_GRAPH_SECRET_HEADER: SOCIAL_GRAPH_SHARED_SECRET},
     )
 
     assert response.status_code == 503
-    assert response.json()["error"]["code"] == "INTERNAL_AUTH_NOT_CONFIGURED"
+    assert response.json()["error"]["code"] == "SOCIAL_GRAPH_AUTH_NOT_CONFIGURED"
 
 
 def test_user_embedding_upsert_supports_snowflake_and_is_idempotent(api):
@@ -139,6 +147,34 @@ def test_post_upsert_and_deletes_follow_canonical_contract(api):
     assert ("delete_user", SNOWFLAKE_ID) in fake.calls
 
 
+def test_post_upsert_accepts_media_without_content(api):
+    client, fake = api
+    post_id = SNOWFLAKE_ID + 3
+
+    response = client.put(
+        f"/internal/recommendation/posts/{post_id}/embedding",
+        headers=internal_headers(),
+        json={"mediaUrls": ["https://example.com/media-without-extension"]},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"success": True, "postId": post_id}
+    assert ("upsert_post", post_id, "", ["https://example.com/media-without-extension"]) in fake.calls
+
+
+def test_post_upsert_rejects_empty_content_and_media(api):
+    client, fake = api
+
+    response = client.put(
+        f"/internal/recommendation/posts/{SNOWFLAKE_ID + 4}/embedding",
+        headers=internal_headers(),
+        json={"content": "   ", "mediaUrls": ["   "]},
+    )
+
+    assert response.status_code == 422
+    assert not any(call[0] == "upsert_post" for call in fake.calls)
+
+
 def test_graphql_recommend_feed_uses_id_scalar_for_snowflakes(api):
     client, fake = api
     response = client.post(
@@ -149,7 +185,7 @@ def test_graphql_recommend_feed_uses_id_scalar_for_snowflakes(api):
         },
         headers={
             CORRELATION_HEADER: "feed-correlation",
-            INTERNAL_SECRET_HEADER: SHARED_SECRET,
+            GATEWAY_SECRET_HEADER: GATEWAY_SHARED_SECRET,
             USER_ID_HEADER: str(SNOWFLAKE_ID),
         },
     )
@@ -166,19 +202,36 @@ def test_graphql_recommend_feed_rejects_missing_or_mismatched_trusted_user(api):
     missing = client.post(
         "/graphql",
         json={"query": query, "variables": {"userId": str(SNOWFLAKE_ID)}},
-        headers={INTERNAL_SECRET_HEADER: SHARED_SECRET},
+        headers={GATEWAY_SECRET_HEADER: GATEWAY_SHARED_SECRET},
     )
     mismatched = client.post(
         "/graphql",
         json={"query": query, "variables": {"userId": str(SNOWFLAKE_ID)}},
         headers={
-            INTERNAL_SECRET_HEADER: SHARED_SECRET,
+            GATEWAY_SECRET_HEADER: GATEWAY_SHARED_SECRET,
             USER_ID_HEADER: str(SNOWFLAKE_ID + 1),
         },
     )
 
     assert missing.json()["errors"][0]["extensions"]["code"] == "UNAUTHENTICATED"
     assert mismatched.json()["errors"][0]["extensions"]["code"] == "FORBIDDEN"
+    assert not any(call[0] == "recommend" for call in fake.calls)
+
+
+def test_graphql_rejects_social_graph_service_secret(api):
+    client, fake = api
+    query = "query Feed($userId: ID!) { recommendFeed(userId: $userId) { postId } }"
+
+    response = client.post(
+        "/graphql",
+        json={"query": query, "variables": {"userId": str(SNOWFLAKE_ID)}},
+        headers={
+            SOCIAL_GRAPH_SECRET_HEADER: SOCIAL_GRAPH_SHARED_SECRET,
+            USER_ID_HEADER: str(SNOWFLAKE_ID),
+        },
+    )
+
+    assert response.json()["errors"][0]["extensions"]["code"] == "FORBIDDEN"
     assert not any(call[0] == "recommend" for call in fake.calls)
 
 
@@ -191,7 +244,7 @@ def test_graphql_recommend_feed_rejects_non_numeric_user_id(api):
             "query": "query { recommendFeed(userId: \"not-a-number\") { postId } }",
         },
         headers={
-            INTERNAL_SECRET_HEADER: SHARED_SECRET,
+            GATEWAY_SECRET_HEADER: GATEWAY_SHARED_SECRET,
             USER_ID_HEADER: "1",
         },
     )

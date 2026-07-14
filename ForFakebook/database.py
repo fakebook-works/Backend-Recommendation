@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import os
 from collections.abc import Sequence
+from pathlib import Path
 
 import numpy as np
+from dotenv import load_dotenv
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 
+
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
@@ -32,7 +36,7 @@ def save_post_embedding(db, post_id: int, embedding: Sequence[float]) -> None:
             INSERT INTO post_embeddings (post_id, embedding)
             VALUES (:post_id, CAST(:embedding AS vector))
             ON CONFLICT (post_id) DO UPDATE
-            SET embedding = EXCLUDED.embedding, updated_at = NOW()
+            SET embedding = EXCLUDED.embedding
             """
         ),
         {"post_id": post_id, "embedding": vector_literal(embedding)},
@@ -44,8 +48,8 @@ def create_user_embedding_if_missing(db, user_id: int, embedding: Sequence[float
     result = db.execute(
         text(
             """
-            INSERT INTO user_embeddings (user_id, embedding, updated_at)
-            VALUES (:user_id, CAST(:embedding AS vector), NOW())
+            INSERT INTO user_embeddings (user_id, embedding)
+            VALUES (:user_id, CAST(:embedding AS vector))
             ON CONFLICT (user_id) DO NOTHING
             """
         ),

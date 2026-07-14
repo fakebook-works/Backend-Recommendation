@@ -16,7 +16,6 @@ CREATE EXTENSION IF NOT EXISTS vector;
 | --- | --- | --- |
 | `user_id` | `BIGINT PRIMARY KEY` | Canonical SocialGraph Snowflake ID |
 | `embedding` | `VECTOR(512) NOT NULL` | Current normalized preference vector |
-| `updated_at` | `TIMESTAMPTZ NOT NULL` | Last vector update time |
 
 Registration uses an idempotent insert: an existing vector is retained on retry.
 
@@ -26,8 +25,6 @@ Registration uses an idempotent insert: an existing vector is retained on retry.
 | --- | --- | --- |
 | `post_id` | `BIGINT PRIMARY KEY` | Canonical SocialGraph post ID |
 | `embedding` | `VECTOR(512) NOT NULL` | Multimodal content vector |
-| `created_at` | `TIMESTAMPTZ NOT NULL` | First creation time |
-| `updated_at` | `TIMESTAMPTZ NOT NULL` | Last upsert time |
 
 Post creation and update use an upsert keyed by `post_id`.
 

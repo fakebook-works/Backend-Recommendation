@@ -1,17 +1,17 @@
-CREATE EXTENSION IF NOT EXISTS vector;
+CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public;
 
-CREATE TABLE post_embeddings (
+CREATE SCHEMA IF NOT EXISTS recommendation;
+
+CREATE TABLE IF NOT EXISTS recommendation.post_embeddings (
     post_id BIGINT PRIMARY KEY,
-    embedding VECTOR(512) NOT NULL,
-    created_at TIMESTAMPTZ DEFAULT NOW(),
-    updated_at TIMESTAMPTZ DEFAULT NOW()
+    embedding public.vector(512) NOT NULL
 );
 
-COMMENT ON TABLE post_embeddings IS
+COMMENT ON TABLE recommendation.post_embeddings IS
 'Stores semantic embeddings generated from post title and content';
 
-COMMENT ON COLUMN post_embeddings.post_id IS
+COMMENT ON COLUMN recommendation.post_embeddings.post_id IS
 'Post identifier';
 
-COMMENT ON COLUMN post_embeddings.embedding IS
+COMMENT ON COLUMN recommendation.post_embeddings.embedding IS
 'Vector representation of post content';
