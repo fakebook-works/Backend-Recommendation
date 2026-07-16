@@ -25,16 +25,17 @@ def test_fetch_candidate_ids_uses_socialgraph_internal_contract():
     result = recommendation_service.fetch_post_candidate_ids(
         9_000_000_000_000_001,
         200,
-        "http://socialgraph:5223/",
+        "http://socialgraph:1002/",
         "shared-secret-at-least-32-bytes-long",
         "correlation",
         fake_get,
     )
 
     assert result == [101, 102]
-    assert captured["url"] == "http://socialgraph:5223/internal/recommendation/post-candidate-ids"
+    assert captured["url"] == "http://socialgraph:1002/internal/recommendation/post-candidate-ids"
     assert captured["params"] == {"userId": 9_000_000_000_000_001, "limit": 200}
-    assert captured["headers"]["X-Gateway-Secret"] == "shared-secret-at-least-32-bytes-long"
+    assert captured["headers"]["X-Internal-SocialGraphService-Secret"] == "shared-secret-at-least-32-bytes-long"
+    assert "X-Gateway-Secret" not in captured["headers"]
     assert captured["headers"]["X-Correlation-ID"] == "correlation"
     assert captured["timeout"] == 10
 
@@ -96,3 +97,50 @@ def test_fetch_candidate_ids_rejects_malformed_socialgraph_payload():
             "shared-secret-at-least-32-bytes-long",
             http_get=fake_get,
         )
+
+
+def test_fetch_reel_candidates_filters_following_and_deduplicates():
+    captured = {}
+
+    def fake_get(url, **kwargs):
+        captured["url"] = url
+        captured.update(kwargs)
+        return FakeResponse(
+            [
+                {"id": 201, "authorId": 1, "source": "recent_public", "createdAt": "now"},
+                {"id": 202, "authorId": 2, "source": "followed", "createdAt": "now"},
+                {"id": 202, "authorId": 2, "source": "followed", "createdAt": "now"},
+            ]
+        )
+
+    result = recommendation_service.fetch_reel_candidate_ids(
+        1,
+        20,
+        "http://socialgraph",
+        "shared-secret-at-least-32-bytes-long",
+        mode="FOLLOWING",
+        http_get=fake_get,
+    )
+
+    assert result == [202]
+    assert captured["url"].endswith("/internal/recommendation/reel-candidates")
+    assert captured["headers"]["X-Internal-SocialGraphService-Secret"] == "shared-secret-at-least-32-bytes-long"
+    assert "X-Gateway-Secret" not in captured["headers"]
+
+
+def test_recommend_reels_ranks_candidates(monkeypatch):
+    monkeypatch.setattr(
+        recommendation_service,
+        "fetch_reel_candidate_ids",
+        lambda *args, **kwargs: [102, 101],
+    )
+
+    result = recommendation_service.recommend_reels_logic(
+        FakeDb(),
+        user_id=1,
+        social_graph_base_url="http://socialgraph",
+        shared_secret="shared-secret-at-least-32-bytes-long",
+        take=2,
+    )
+
+    assert result == [{"reelId": 101}, {"reelId": 102}]

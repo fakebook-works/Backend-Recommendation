@@ -6,6 +6,7 @@ Recommendation owns only derived vector data and ranking logic:
 
 - `user_embeddings`: one 512-dimensional preference vector per canonical user ID.
 - `post_embeddings`: one 512-dimensional multimodal vector per canonical post ID.
+- `recommendation_interactions`: idempotent feedback ledger for user-vector updates.
 
 SocialGraph owns users, posts, relationships, blocks, privacy, and candidate generation. Recommendation must not read or write SocialGraph tables directly.
 
@@ -25,7 +26,7 @@ Response la JSON array ID-only, vi du `[789, 788, 777]`. SocialGraph chiu trach 
 
 Post embeddings combine text and any downloadable image/video media. Models are loaded lazily so health checks and user provisioning do not download model weights.
 
-New users receive a normalized deterministic initial vector derived from their canonical ID. This makes retry behavior stable while no interaction-history initializer exists. The endpoint uses idempotent `PUT`, so an existing user vector is not replaced during registration retries.
+New users receive a normalized deterministic initial vector derived from their canonical ID. The endpoint uses idempotent `PUT`, so an existing user vector is not replaced during registration retries. Like, unlike, save, unsave, watch, share, and comment events then move the vector toward or away from the target post embedding with a signed normalized EMA step.
 
 ## Ranking
 
@@ -43,9 +44,9 @@ Gateway Fusion uses SocialGraph's internal `RecommendationItem(postId)` lookup t
 
 - Authentication remains the required registration dependency.
 - User embedding provisioning occurs only after Authentication succeeds.
-- Recommendation provisioning is best-effort from SocialGraph and safe to retry.
+- Recommendation provisioning and interaction delivery use SocialGraph's durable outbox and are safe to retry.
 - Recommendation feed errors should not change SocialGraph source data.
 - Internal endpoints fail closed if shared-secret authentication is not configured.
 - `recommendFeed` requires matching trusted `X-Gateway-Secret`, `X-User-Id`, and `userId` argument.
 
-Durable retry/outbox handling is a later step; current failed best-effort calls are logged with a correlation ID.
+Every interaction carries the stable outbox event ID as `Idempotency-Key`. Recommendation inserts that key and updates the vector in one transaction, so at-least-once delivery cannot train twice. Feedback for a target whose embedding has not arrived returns HTTP 425 and remains retryable.

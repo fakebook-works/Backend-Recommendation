@@ -25,10 +25,16 @@ PUT    /internal/recommendation/users/{userId}/embedding
 DELETE /internal/recommendation/users/{userId}/embedding
 PUT    /internal/recommendation/posts/{postId}/embedding
 DELETE /internal/recommendation/posts/{postId}/embedding
+POST   /internal/recommendation/users/{userId}/interactions
 ```
 
-All four routes require `X-Internal-RecommendationService-Secret`. User and post IDs
-are path parameters; post upsert is the only write route with a JSON body.
+All five routes require `X-Internal-RecommendationService-Secret`. User and post IDs
+are path parameters. The interaction route also requires `Idempotency-Key` and accepts
+`LIKE`, `UNLIKE`, `SAVE`, `UNSAVE`, `WATCH`, `SHARE`, or `COMMENT`. It records the
+feedback and updates the normalized user-interest vector in one transaction. Feedback
+for one user is serialized with a PostgreSQL advisory transaction lock. If its target
+embedding is not ready, it returns HTTP 425 so the SocialGraph outbox retries later.
+User and post deletion remove their corresponding feedback-ledger rows as well.
 
 The GraphQL schema deliberately has no mutation type. This prevents frontend callers from creating or deleting derived vectors directly. `recommendFeed` additionally requires a valid Gateway secret and an `X-User-Id` matching its `userId` argument.
 
@@ -42,7 +48,8 @@ Model imports and weights are deferred until a post embedding is requested. Ther
 
 ## Database Isolation
 
-This service queries only `user_embeddings` and `post_embeddings`. Candidate
+This service queries `user_embeddings`, `post_embeddings`, and the additive
+`recommendation_interactions` feedback ledger. Candidate
 retrieval uses SocialGraph's `GET /internal/recommendation/post-candidate-ids`
 ID-only contract. Its outbound credential is separate from the
 `SOCIAL_GRAPH_SERVICE_SECRET` used by SocialGraph when calling Recommendation.

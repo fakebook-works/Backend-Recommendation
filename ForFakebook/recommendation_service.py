@@ -10,6 +10,7 @@ from .database import parse_vector
 
 
 MAX_SIGNED_64_BIT_ID = 9_223_372_036_854_775_807
+SOCIAL_GRAPH_INTERNAL_SECRET_HEADER = "X-Internal-SocialGraphService-Secret"
 
 
 def fetch_post_candidate_ids(
@@ -20,7 +21,7 @@ def fetch_post_candidate_ids(
     correlation_id: str | None = None,
     http_get: Callable = requests.get,
 ) -> list[int]:
-    headers = {"X-Gateway-Secret": shared_secret}
+    headers = {SOCIAL_GRAPH_INTERNAL_SECRET_HEADER: shared_secret}
     if correlation_id:
         headers["X-Correlation-ID"] = correlation_id
 
@@ -51,24 +52,65 @@ def fetch_post_candidate_ids(
     return candidate_ids
 
 
-def recommend_feed_logic(
-    db,
+def fetch_reel_candidate_ids(
     user_id: int,
+    limit: int,
     social_graph_base_url: str,
     shared_secret: str,
-    skip: int = 0,
-    take: int = 20,
+    mode: str = "FOR_YOU",
     correlation_id: str | None = None,
+    http_get: Callable = requests.get,
+) -> list[int]:
+    headers = {SOCIAL_GRAPH_INTERNAL_SECRET_HEADER: shared_secret}
+    if correlation_id:
+        headers["X-Correlation-ID"] = correlation_id
+
+    response = http_get(
+        f"{social_graph_base_url.rstrip('/')}/internal/recommendation/reel-candidates",
+        params={"userId": user_id, "limit": limit},
+        headers=headers,
+        timeout=10,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    if not isinstance(payload, list):
+        raise ValueError("SocialGraph reel candidate response must be a JSON array.")
+
+    normalized_mode = mode.upper()
+    if normalized_mode not in {"FOR_YOU", "FOLLOWING"}:
+        raise ValueError("mode must be FOR_YOU or FOLLOWING")
+
+    candidate_ids: list[int] = []
+    seen: set[int] = set()
+    for item in payload:
+        if not isinstance(item, dict):
+            raise ValueError("SocialGraph returned an invalid reel candidate.")
+
+        value = item.get("id")
+        source = item.get("source")
+        if type(value) is not int or value <= 0 or value > MAX_SIGNED_64_BIT_ID:
+            raise ValueError("SocialGraph returned an invalid reel candidate ID.")
+        if not isinstance(source, str):
+            raise ValueError("SocialGraph returned an invalid reel candidate source.")
+        if normalized_mode == "FOLLOWING" and source != "followed":
+            continue
+        if value not in seen:
+            seen.add(value)
+            candidate_ids.append(value)
+
+    return candidate_ids
+
+
+def rank_candidate_ids(
+    db,
+    user_id: int,
+    candidate_ids: list[int],
+    skip: int,
+    take: int,
+    result_key: str,
 ) -> list[dict]:
     normalized_skip = max(0, skip)
     normalized_take = min(max(1, take), 100)
-    candidate_ids = fetch_post_candidate_ids(
-        user_id,
-        min(500, normalized_skip + normalized_take + 200),
-        social_graph_base_url,
-        shared_secret,
-        correlation_id,
-    )
     if not candidate_ids:
         return []
 
@@ -92,15 +134,73 @@ def recommend_feed_logic(
 
     user_norm = np.linalg.norm(user_embedding)
     ranked: list[tuple[int, float]] = []
-    for post_id in candidate_ids:
-        post_embedding = post_embeddings.get(post_id)
+    for candidate_id in candidate_ids:
+        post_embedding = post_embeddings.get(candidate_id)
         semantic_score = 0.0
         if post_embedding is not None and user_norm > 0:
             semantic_score = float(np.dot(user_embedding, post_embedding))
-        ranked.append((post_id, semantic_score))
+        ranked.append((candidate_id, semantic_score))
 
     ranked.sort(key=lambda item: item[1], reverse=True)
     return [
-        {"postId": post_id}
-        for post_id, _ in ranked[normalized_skip : normalized_skip + normalized_take]
+        {result_key: candidate_id}
+        for candidate_id, _ in ranked[normalized_skip : normalized_skip + normalized_take]
     ]
+
+
+def recommend_feed_logic(
+    db,
+    user_id: int,
+    social_graph_base_url: str,
+    shared_secret: str,
+    skip: int = 0,
+    take: int = 20,
+    correlation_id: str | None = None,
+) -> list[dict]:
+    normalized_skip = max(0, skip)
+    normalized_take = min(max(1, take), 100)
+    candidate_ids = fetch_post_candidate_ids(
+        user_id,
+        min(500, normalized_skip + normalized_take + 200),
+        social_graph_base_url,
+        shared_secret,
+        correlation_id,
+    )
+    return rank_candidate_ids(
+        db,
+        user_id,
+        candidate_ids,
+        normalized_skip,
+        normalized_take,
+        "postId",
+    )
+
+
+def recommend_reels_logic(
+    db,
+    user_id: int,
+    social_graph_base_url: str,
+    shared_secret: str,
+    mode: str = "FOR_YOU",
+    skip: int = 0,
+    take: int = 20,
+    correlation_id: str | None = None,
+) -> list[dict]:
+    normalized_skip = max(0, skip)
+    normalized_take = min(max(1, take), 100)
+    candidate_ids = fetch_reel_candidate_ids(
+        user_id,
+        min(500, normalized_skip + normalized_take + 200),
+        social_graph_base_url,
+        shared_secret,
+        mode,
+        correlation_id,
+    )
+    return rank_candidate_ids(
+        db,
+        user_id,
+        candidate_ids,
+        normalized_skip,
+        normalized_take,
+        "reelId",
+    )

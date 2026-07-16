@@ -68,3 +68,29 @@ def parse_vector(value) -> np.ndarray:
     if isinstance(value, (list, tuple, np.ndarray)):
         return np.asarray(value, dtype=float)
     return np.asarray(value, dtype=float)
+
+
+def ensure_interaction_schema(db) -> None:
+    """Create the additive feedback table without requiring a destructive migration."""
+    db.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS recommendation_interactions (
+                idempotency_key VARCHAR(128) PRIMARY KEY,
+                user_id BIGINT NOT NULL,
+                target_id BIGINT NOT NULL,
+                action VARCHAR(16) NOT NULL,
+                weight REAL NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+    )
+    db.execute(
+        text(
+            """
+            CREATE INDEX IF NOT EXISTS ix_recommendation_interactions_user_created
+            ON recommendation_interactions (user_id, created_at DESC)
+            """
+        )
+    )

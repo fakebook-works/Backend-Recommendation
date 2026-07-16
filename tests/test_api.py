@@ -6,11 +6,11 @@ from fastapi.testclient import TestClient
 from ForFakebook.EmbeddingModel import (
     CORRELATION_HEADER,
     GATEWAY_SECRET_HEADER,
-    SOCIAL_GRAPH_SECRET_HEADER,
+    RECOMMENDATION_INTERNAL_SECRET_HEADER,
     USER_ID_HEADER,
     app,
 )
-from ForFakebook.operations import get_operations
+from ForFakebook.operations import InteractionTargetUnavailableError, get_operations
 
 
 GATEWAY_SHARED_SECRET = "gateway-test-shared-secret-at-least-32-bytes"
@@ -38,6 +38,14 @@ class FakeOperations:
     def delete_post_embedding(self, post_id):
         self.calls.append(("delete_post", post_id))
 
+    def record_interaction(self, user_id, target_id, action, idempotency_key):
+        self.calls.append(
+            ("record_interaction", user_id, target_id, action, idempotency_key)
+        )
+        if target_id == SNOWFLAKE_ID + 99:
+            raise InteractionTargetUnavailableError("Target embedding is not available yet.")
+        return not idempotency_key.endswith("duplicate")
+
     def recommend_feed(self, user_id, skip, take, correlation_id=None):
         self.calls.append(("recommend", user_id, skip, take, correlation_id))
         return [
@@ -46,11 +54,16 @@ class FakeOperations:
             }
         ]
 
+    def recommend_reels(self, user_id, mode, skip, take, correlation_id=None):
+        self.calls.append(("recommend_reels", user_id, mode, skip, take, correlation_id))
+        return [{"reelId": SNOWFLAKE_ID + 2}]
+
 
 @pytest.fixture()
 def api(monkeypatch):
     fake = FakeOperations()
     monkeypatch.setenv("INTERNAL_SHARED_SECRET", GATEWAY_SHARED_SECRET)
+    monkeypatch.setenv("RECOMMENDATION_INTERNAL_SECRET", SOCIAL_GRAPH_SHARED_SECRET)
     monkeypatch.setenv("SOCIAL_GRAPH_SERVICE_SECRET", SOCIAL_GRAPH_SHARED_SECRET)
     app.dependency_overrides[get_operations] = lambda: fake
     with TestClient(app) as client:
@@ -59,7 +72,7 @@ def api(monkeypatch):
 
 
 def internal_headers(correlation_id=None):
-    headers = {SOCIAL_GRAPH_SECRET_HEADER: SOCIAL_GRAPH_SHARED_SECRET}
+    headers = {RECOMMENDATION_INTERNAL_SECRET_HEADER: SOCIAL_GRAPH_SHARED_SECRET}
     if correlation_id:
         headers[CORRELATION_HEADER] = correlation_id
     return headers
@@ -70,8 +83,8 @@ def test_internal_routes_reject_missing_and_invalid_secret(api):
     path = f"/internal/recommendation/users/{SNOWFLAKE_ID}/embedding"
 
     assert client.put(path).status_code == 403
-    assert client.put(path, headers={SOCIAL_GRAPH_SECRET_HEADER: "wrong"}).status_code == 403
-    assert client.put(path, headers={SOCIAL_GRAPH_SECRET_HEADER: b"\xffinvalid"}).status_code == 403
+    assert client.put(path, headers={RECOMMENDATION_INTERNAL_SECRET_HEADER: "wrong"}).status_code == 403
+    assert client.put(path, headers={RECOMMENDATION_INTERNAL_SECRET_HEADER: b"\xffinvalid"}).status_code == 403
     assert client.put(
         path,
         headers={"X-Internal-SocialGraphService-Secret": SOCIAL_GRAPH_SHARED_SECRET},
@@ -90,15 +103,15 @@ def test_internal_auth_matches_path_segment_only(api):
 
 def test_internal_routes_fail_closed_when_secret_is_not_configured(api, monkeypatch):
     client, _ = api
-    monkeypatch.delenv("SOCIAL_GRAPH_SERVICE_SECRET", raising=False)
+    monkeypatch.delenv("RECOMMENDATION_INTERNAL_SECRET", raising=False)
 
     response = client.put(
         f"/internal/recommendation/users/{SNOWFLAKE_ID}/embedding",
-        headers={SOCIAL_GRAPH_SECRET_HEADER: SOCIAL_GRAPH_SHARED_SECRET},
+        headers={RECOMMENDATION_INTERNAL_SECRET_HEADER: SOCIAL_GRAPH_SHARED_SECRET},
     )
 
     assert response.status_code == 503
-    assert response.json()["error"]["code"] == "SOCIAL_GRAPH_AUTH_NOT_CONFIGURED"
+    assert response.json()["error"]["code"] == "RECOMMENDATION_AUTH_NOT_CONFIGURED"
 
 
 def test_user_embedding_upsert_supports_snowflake_and_is_idempotent(api):
@@ -175,6 +188,83 @@ def test_post_upsert_rejects_empty_content_and_media(api):
     assert not any(call[0] == "upsert_post" for call in fake.calls)
 
 
+def test_recommendation_interaction_is_authenticated_and_idempotent(api):
+    client, fake = api
+    path = f"/internal/recommendation/users/{SNOWFLAKE_ID}/interactions"
+    body = {"targetId": SNOWFLAKE_ID + 7, "action": "SAVE"}
+
+    first = client.post(
+        path,
+        headers={**internal_headers(), "Idempotency-Key": "save-event-1"},
+        json=body,
+    )
+    duplicate = client.post(
+        path,
+        headers={**internal_headers(), "Idempotency-Key": "save-event-duplicate"},
+        json=body,
+    )
+
+    assert first.status_code == 200
+    assert first.json() == {
+        "success": True,
+        "applied": True,
+        "userId": SNOWFLAKE_ID,
+        "targetId": SNOWFLAKE_ID + 7,
+        "action": "SAVE",
+    }
+    assert duplicate.status_code == 200
+    assert duplicate.json()["applied"] is False
+    assert fake.calls[-2:] == [
+        (
+            "record_interaction",
+            SNOWFLAKE_ID,
+            SNOWFLAKE_ID + 7,
+            "SAVE",
+            "save-event-1",
+        ),
+        (
+            "record_interaction",
+            SNOWFLAKE_ID,
+            SNOWFLAKE_ID + 7,
+            "SAVE",
+            "save-event-duplicate",
+        ),
+    ]
+
+
+def test_recommendation_interaction_requires_idempotency_key_and_valid_action(api):
+    client, fake = api
+    path = f"/internal/recommendation/users/{SNOWFLAKE_ID}/interactions"
+
+    missing_key = client.post(
+        path,
+        headers=internal_headers(),
+        json={"targetId": SNOWFLAKE_ID + 7, "action": "LIKE"},
+    )
+    invalid_action = client.post(
+        path,
+        headers={**internal_headers(), "Idempotency-Key": "invalid-action"},
+        json={"targetId": SNOWFLAKE_ID + 7, "action": "CLICK"},
+    )
+
+    assert missing_key.status_code == 422
+    assert invalid_action.status_code == 422
+    assert not any(call[0] == "record_interaction" for call in fake.calls)
+
+
+def test_recommendation_interaction_retries_when_target_embedding_is_late(api):
+    client, _ = api
+
+    response = client.post(
+        f"/internal/recommendation/users/{SNOWFLAKE_ID}/interactions",
+        headers={**internal_headers(), "Idempotency-Key": "late-target"},
+        json={"targetId": SNOWFLAKE_ID + 99, "action": "COMMENT"},
+    )
+
+    assert response.status_code == 425
+    assert "not available" in response.json()["detail"]
+
+
 def test_graphql_recommend_feed_uses_id_scalar_for_snowflakes(api):
     client, fake = api
     response = client.post(
@@ -193,6 +283,33 @@ def test_graphql_recommend_feed_uses_id_scalar_for_snowflakes(api):
     assert response.status_code == 200
     assert response.json()["data"]["recommendFeed"][0]["postId"] == str(SNOWFLAKE_ID + 1)
     assert fake.calls[-1] == ("recommend", SNOWFLAKE_ID, 0, 20, "feed-correlation")
+
+
+def test_graphql_recommend_reels_supports_following_mode(api):
+    client, fake = api
+    response = client.post(
+        "/graphql",
+        json={
+            "query": "query Reels($userId: ID!) { recommendReels(userId: $userId, mode: FOLLOWING) { reelId } }",
+            "variables": {"userId": str(SNOWFLAKE_ID)},
+        },
+        headers={
+            CORRELATION_HEADER: "reel-correlation",
+            GATEWAY_SECRET_HEADER: GATEWAY_SHARED_SECRET,
+            USER_ID_HEADER: str(SNOWFLAKE_ID),
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["recommendReels"][0]["reelId"] == str(SNOWFLAKE_ID + 2)
+    assert fake.calls[-1] == (
+        "recommend_reels",
+        SNOWFLAKE_ID,
+        "FOLLOWING",
+        0,
+        20,
+        "reel-correlation",
+    )
 
 
 def test_graphql_recommend_feed_rejects_missing_or_mismatched_trusted_user(api):
@@ -226,7 +343,7 @@ def test_graphql_rejects_social_graph_service_secret(api):
         "/graphql",
         json={"query": query, "variables": {"userId": str(SNOWFLAKE_ID)}},
         headers={
-            SOCIAL_GRAPH_SECRET_HEADER: SOCIAL_GRAPH_SHARED_SECRET,
+            RECOMMENDATION_INTERNAL_SECRET_HEADER: SOCIAL_GRAPH_SHARED_SECRET,
             USER_ID_HEADER: str(SNOWFLAKE_ID),
         },
     )

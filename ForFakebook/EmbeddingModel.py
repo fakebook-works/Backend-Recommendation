@@ -3,9 +3,10 @@ from __future__ import annotations
 import hmac
 import os
 import uuid
+from enum import Enum
 
 import strawberry
-from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse
 from graphql import GraphQLError
 from pydantic import BaseModel, Field, model_validator
@@ -13,6 +14,7 @@ from strawberry.fastapi import GraphQLRouter
 from strawberry.types import Info
 
 from .operations import (
+    InteractionTargetUnavailableError,
     RecommendationOperations,
     RecommendationUnavailableError,
     get_operations,
@@ -20,7 +22,7 @@ from .operations import (
 
 
 GATEWAY_SECRET_HEADER = "X-Gateway-Secret"
-SOCIAL_GRAPH_SECRET_HEADER = "X-Internal-RecommendationService-Secret"
+RECOMMENDATION_INTERNAL_SECRET_HEADER = "X-Internal-RecommendationService-Secret"
 CORRELATION_HEADER = "X-Correlation-ID"
 USER_ID_HEADER = "X-User-Id"
 MAX_SIGNED_64_BIT_ID = 9_223_372_036_854_775_807
@@ -33,15 +35,15 @@ async def internal_security_and_correlation(request: Request, call_next):
     correlation_id = request.headers.get(CORRELATION_HEADER) or uuid.uuid4().hex
 
     if request.url.path == "/internal" or request.url.path.startswith("/internal/"):
-        expected_secret = os.getenv("SOCIAL_GRAPH_SERVICE_SECRET", "")
-        provided_secret = request.headers.get(SOCIAL_GRAPH_SECRET_HEADER, "")
+        expected_secret = os.getenv("RECOMMENDATION_INTERNAL_SECRET", "")
+        provided_secret = request.headers.get(RECOMMENDATION_INTERNAL_SECRET_HEADER, "")
         if len(expected_secret.encode("utf-8")) < 32:
             response = JSONResponse(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 content={
                     "error": {
-                        "code": "SOCIAL_GRAPH_AUTH_NOT_CONFIGURED",
-                        "message": "SocialGraph service authentication is not configured.",
+                        "code": "RECOMMENDATION_AUTH_NOT_CONFIGURED",
+                        "message": "Recommendation internal authentication is not configured.",
                     }
                 },
             )
@@ -92,7 +94,32 @@ class PostEmbeddingPayload(BaseModel):
     postId: int
 
 
+class RecommendationInteractionAction(str, Enum):
+    LIKE = "LIKE"
+    UNLIKE = "UNLIKE"
+    SAVE = "SAVE"
+    UNSAVE = "UNSAVE"
+    WATCH = "WATCH"
+    SHARE = "SHARE"
+    COMMENT = "COMMENT"
+
+
+class RecommendationInteractionRequest(BaseModel):
+    targetId: int = Field(gt=0, le=MAX_SIGNED_64_BIT_ID)
+    action: RecommendationInteractionAction
+
+
+class RecommendationInteractionPayload(BaseModel):
+    success: bool
+    applied: bool
+    userId: int
+    targetId: int
+    action: RecommendationInteractionAction
+
+
 def _translate_operation_error(exception: Exception) -> HTTPException:
+    if isinstance(exception, InteractionTargetUnavailableError):
+        return HTTPException(status_code=425, detail=str(exception))
     if isinstance(exception, RecommendationUnavailableError):
         return HTTPException(status_code=503, detail=str(exception))
     if isinstance(exception, ValueError):
@@ -172,9 +199,54 @@ def delete_post_embedding(
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
+@app.post(
+    "/internal/recommendation/users/{user_id}/interactions",
+    response_model=RecommendationInteractionPayload,
+)
+def record_recommendation_interaction(
+    user_id: int,
+    request: RecommendationInteractionRequest,
+    idempotency_key: str = Header(
+        ...,
+        alias="Idempotency-Key",
+        min_length=1,
+        max_length=128,
+    ),
+    operations: RecommendationOperations = Depends(get_operations),
+) -> RecommendationInteractionPayload:
+    try:
+        applied = operations.record_interaction(
+            user_id,
+            request.targetId,
+            request.action.value,
+            idempotency_key,
+        )
+    except Exception as exception:
+        raise _translate_operation_error(exception) from exception
+
+    return RecommendationInteractionPayload(
+        success=True,
+        applied=applied,
+        userId=user_id,
+        targetId=request.targetId,
+        action=request.action,
+    )
+
+
 @strawberry.type
 class RecommendationItem:
     post_id: strawberry.ID
+
+
+@strawberry.type
+class ReelRecommendationItem:
+    reel_id: strawberry.ID
+
+
+@strawberry.enum
+class ReelRecommendationMode(Enum):
+    FOR_YOU = "FOR_YOU"
+    FOLLOWING = "FOLLOWING"
 
 
 @strawberry.type
@@ -203,6 +275,32 @@ class Query:
         return [
             RecommendationItem(
                 post_id=strawberry.ID(str(row["postId"])),
+            )
+            for row in rows
+        ]
+
+    @strawberry.field
+    def recommend_reels(
+        self,
+        info: Info,
+        user_id: strawberry.ID,
+        mode: ReelRecommendationMode = ReelRecommendationMode.FOR_YOU,
+        skip: int = 0,
+        take: int = 20,
+    ) -> list[ReelRecommendationItem]:
+        parsed_user_id = _parse_user_id(user_id)
+        _require_trusted_viewer(info, parsed_user_id)
+        operations: RecommendationOperations = info.context["operations"]
+        rows = operations.recommend_reels(
+            parsed_user_id,
+            mode.value,
+            skip,
+            take,
+            info.context.get("correlation_id"),
+        )
+        return [
+            ReelRecommendationItem(
+                reel_id=strawberry.ID(str(row["reelId"])),
             )
             for row in rows
         ]
