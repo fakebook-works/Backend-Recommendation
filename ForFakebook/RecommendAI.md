@@ -51,7 +51,11 @@ Model imports and weights are deferred until a post embedding is requested. Ther
 This service queries `user_embeddings`, `post_embeddings`, and the additive
 `recommendation_interactions` feedback ledger. Candidate
 retrieval uses SocialGraph's `GET /internal/recommendation/post-candidate-ids`
-ID-only contract. Its outbound credential is separate from the
+ID-only contract. Despite the compatible `postId` result name, Home candidates can
+represent `FeedPost`, `GroupPost`, or `Reel`; Recommendation ranks these IDs as opaque
+content IDs and never decides privacy or object type itself. SocialGraph filters visibility
+when producing candidates and checks it again while Fusion hydrates `FeedPostDetail`,
+`GroupPostDetail`, or `ReelDetail`. Its outbound credential is separate from the
 `SOCIAL_GRAPH_SERVICE_SECRET` used by SocialGraph when calling Recommendation.
 Post hydration remains in SocialGraph and is composed by Fusion.
 

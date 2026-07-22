@@ -180,7 +180,7 @@ Example variables:
 }
 ```
 
-The public result deliberately contains only ranked `postId` values. Ranking diagnostics are internal implementation details, not a frontend contract. In the composed Gateway schema, each item also has SocialGraph's nullable `post` field, including group metadata for `GroupPostDetail`. There is no GraphQL mutation for embedding writes.
+The public result deliberately contains only ranked `postId` values. The field name is retained for backward compatibility, but the value is a SocialGraph content-object ID and Home candidates may be `FeedPost`, `GroupPost`, or `Reel`. Ranking diagnostics are internal implementation details, not a frontend contract. In the composed Gateway schema, each item also has SocialGraph's nullable `post` field, hydrated as `FeedPostDetail`, `GroupPostDetail`, or `ReelDetail`. There is no GraphQL mutation for embedding writes.
 
 Reel ranking uses the same trusted-viewer boundary and embedding store. `FOR_YOU`
 uses all SocialGraph-approved candidates; `FOLLOWING` keeps candidates from followed
@@ -201,11 +201,11 @@ calls SocialGraph with the independent `SOCIAL_GRAPH_SERVICE_SECRET`.
 ## Candidate and Ranking Flow
 
 1. Recommendation calls `GET {SOCIAL_GRAPH_BASE_URL}/internal/recommendation/post-candidate-ids?userId=...&limit=...` with `X-Internal-SocialGraphService-Secret` from `SOCIAL_GRAPH_SERVICE_SECRET` and the correlation ID.
-2. SocialGraph returns a deduplicated JSON array of positive signed 64-bit post IDs after privacy and block filtering.
+2. SocialGraph returns a deduplicated JSON array of positive signed 64-bit content IDs for eligible `FeedPost`, `GroupPost`, and `Reel` objects after privacy and block filtering. Recommendation treats these IDs as opaque and does not infer object type or visibility from an embedding.
 3. Recommendation loads the interaction-trained user vector and available candidate post vectors from its own database.
 4. It ranks by semantic dot product. Candidates without a stored embedding receive score `0`; Python's stable sort preserves SocialGraph order for ties.
 5. It applies bounded offset pagination (`skip >= 0`, `take` clamped to `1..100`) and returns only IDs.
-6. Fusion uses SocialGraph's internal `RecommendationItem` lookup to batch-hydrate `post`; deleted or newly unauthorized posts become `post: null`.
+6. Fusion uses SocialGraph's internal `RecommendationItem` lookup to batch-hydrate `post`; SocialGraph checks visibility again and returns `FeedPostDetail`, `GroupPostDetail`, or `ReelDetail`. Deleted or newly unauthorized content becomes `post: null`.
 
 ## Registration Integration
 
