@@ -7,6 +7,7 @@ import requests
 from sqlalchemy import text
 
 from .database import parse_vector
+from .internal_signing import signed_headers
 
 
 MAX_SIGNED_64_BIT_ID = 9_223_372_036_854_775_807
@@ -21,13 +22,20 @@ def fetch_post_candidate_ids(
     correlation_id: str | None = None,
     http_get: Callable = requests.get,
 ) -> list[int]:
-    headers = {SOCIAL_GRAPH_INTERNAL_SECRET_HEADER: shared_secret}
-    if correlation_id:
-        headers["X-Correlation-ID"] = correlation_id
+    url = f"{social_graph_base_url.rstrip('/')}/internal/recommendation/post-candidate-ids"
+    params = {"userId": user_id, "limit": limit}
+    headers = signed_headers(
+        shared_secret,
+        "GET",
+        url,
+        params=params,
+        legacy_header=SOCIAL_GRAPH_INTERNAL_SECRET_HEADER,
+        extra_headers={"X-Correlation-ID": correlation_id} if correlation_id else None,
+    )
 
     response = http_get(
-        f"{social_graph_base_url.rstrip('/')}/internal/recommendation/post-candidate-ids",
-        params={"userId": user_id, "limit": limit},
+        url,
+        params=params,
         headers=headers,
         timeout=10,
     )
@@ -61,13 +69,20 @@ def fetch_reel_candidate_ids(
     correlation_id: str | None = None,
     http_get: Callable = requests.get,
 ) -> list[int]:
-    headers = {SOCIAL_GRAPH_INTERNAL_SECRET_HEADER: shared_secret}
-    if correlation_id:
-        headers["X-Correlation-ID"] = correlation_id
+    url = f"{social_graph_base_url.rstrip('/')}/internal/recommendation/reel-candidates"
+    params = {"userId": user_id, "limit": limit}
+    headers = signed_headers(
+        shared_secret,
+        "GET",
+        url,
+        params=params,
+        legacy_header=SOCIAL_GRAPH_INTERNAL_SECRET_HEADER,
+        extra_headers={"X-Correlation-ID": correlation_id} if correlation_id else None,
+    )
 
     response = http_get(
-        f"{social_graph_base_url.rstrip('/')}/internal/recommendation/reel-candidates",
-        params={"userId": user_id, "limit": limit},
+        url,
+        params=params,
         headers=headers,
         timeout=10,
     )

@@ -1,6 +1,7 @@
 import numpy as np
 
 from ForFakebook import recommendation_service
+from ForFakebook.internal_signing import NONCE_HEADER, SIGNATURE_HEADER, TIMESTAMP_HEADER, sign
 
 
 class FakeResponse:
@@ -38,6 +39,46 @@ def test_fetch_candidate_ids_uses_socialgraph_internal_contract():
     assert "X-Gateway-Secret" not in captured["headers"]
     assert captured["headers"]["X-Correlation-ID"] == "correlation"
     assert captured["timeout"] == 10
+
+
+def test_internal_signing_matches_cross_language_vectors():
+    secret = "test-internal-secret-0123456789ab"
+    assert sign(
+        secret,
+        "POST",
+        "/internal/users?x=1",
+        1_753_500_000,
+        "0123456789abcdef0123456789abcdef",
+        b'{"userId":42}',
+    ) == "e0f96895cf6c2f5b4f075e7f6f36902e591d2ce178321550041d45e6c8726512"
+    assert sign(
+        secret,
+        "GET",
+        "/internal/users/42/friend-ids",
+        1_753_500_000,
+        "ffffffffffffffffffffffffffffffff",
+        b"",
+    ) == "3ff404655307935abc5825da27bf6fd4b311b0f2034a23a0d7ebbc012aa430c1"
+
+
+def test_candidate_fetch_can_omit_raw_secret_while_retaining_signature(monkeypatch):
+    captured = {}
+
+    def fake_get(url, **kwargs):
+        captured.update(kwargs)
+        return FakeResponse([])
+
+    monkeypatch.setenv("INTERNAL_AUTH_SEND_LEGACY_SECRET", "false")
+    recommendation_service.fetch_post_candidate_ids(
+        1,
+        20,
+        "http://socialgraph",
+        "shared-secret-at-least-32-bytes-long",
+        http_get=fake_get,
+    )
+
+    assert "X-Internal-SocialGraphService-Secret" not in captured["headers"]
+    assert {TIMESTAMP_HEADER, NONCE_HEADER, SIGNATURE_HEADER}.issubset(captured["headers"])
 
 
 class FakeResult:

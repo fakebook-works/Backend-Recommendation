@@ -11,6 +11,12 @@ from ForFakebook.EmbeddingModel import (
     app,
 )
 from ForFakebook.operations import InteractionTargetUnavailableError, get_operations
+from ForFakebook.internal_signing import (
+    NONCE_HEADER,
+    SIGNATURE_HEADER,
+    TIMESTAMP_HEADER,
+    signed_headers,
+)
 
 
 GATEWAY_SHARED_SECRET = "gateway-test-shared-secret-at-least-32-bytes"
@@ -108,6 +114,43 @@ def test_internal_routes_fail_closed_when_secret_is_not_configured(api, monkeypa
     response = client.put(
         f"/internal/recommendation/users/{SNOWFLAKE_ID}/embedding",
         headers={RECOMMENDATION_INTERNAL_SECRET_HEADER: SOCIAL_GRAPH_SHARED_SECRET},
+    )
+
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "RECOMMENDATION_AUTH_NOT_CONFIGURED"
+
+
+def test_internal_signature_is_required_and_nonce_replay_is_rejected(api, monkeypatch):
+    client, _ = api
+    monkeypatch.setenv("INTERNAL_AUTH_REQUIRE_SIGNATURE", "true")
+    path = f"/internal/recommendation/users/{SNOWFLAKE_ID}/embedding"
+
+    unsigned = client.put(path, headers=internal_headers())
+    assert unsigned.status_code == 403
+    assert unsigned.json()["error"]["code"] == "INTERNAL_SIGNATURE_REQUIRED"
+
+    headers = signed_headers(
+        SOCIAL_GRAPH_SHARED_SECRET,
+        "PUT",
+        "http://testserver" + path,
+        legacy_header=RECOMMENDATION_INTERNAL_SECRET_HEADER,
+    )
+    first = client.put(path, headers=headers)
+    replay = client.put(path, headers=headers)
+
+    assert first.status_code == 200
+    assert replay.status_code == 403
+    assert replay.json()["error"]["code"] == "INVALID_INTERNAL_SIGNATURE"
+    assert {TIMESTAMP_HEADER, NONCE_HEADER, SIGNATURE_HEADER}.issubset(headers)
+
+
+def test_invalid_internal_signing_flag_fails_closed(api, monkeypatch):
+    client, _ = api
+    monkeypatch.setenv("INTERNAL_AUTH_REQUIRE_SIGNATURE", "typo")
+
+    response = client.put(
+        f"/internal/recommendation/users/{SNOWFLAKE_ID}/embedding",
+        headers=internal_headers(),
     )
 
     assert response.status_code == 503

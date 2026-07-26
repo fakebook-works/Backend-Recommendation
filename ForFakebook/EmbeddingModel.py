@@ -19,6 +19,14 @@ from .operations import (
     RecommendationUnavailableError,
     get_operations,
 )
+from .internal_signing import (
+    NONCE_HEADER,
+    SIGNATURE_HEADER,
+    TIMESTAMP_HEADER,
+    SignatureValidator,
+    env_flag,
+    validator as internal_signature_validator,
+)
 
 
 GATEWAY_SECRET_HEADER = "X-Gateway-Secret"
@@ -36,7 +44,6 @@ async def internal_security_and_correlation(request: Request, call_next):
 
     if request.url.path == "/internal" or request.url.path.startswith("/internal/"):
         expected_secret = os.getenv("RECOMMENDATION_INTERNAL_SECRET", "")
-        provided_secret = request.headers.get(RECOMMENDATION_INTERNAL_SECRET_HEADER, "")
         if len(expected_secret.encode("utf-8")) < 32:
             response = JSONResponse(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -50,16 +57,79 @@ async def internal_security_and_correlation(request: Request, call_next):
             response.headers[CORRELATION_HEADER] = correlation_id
             return response
 
-        if not hmac.compare_digest(
-            expected_secret.encode("utf-8"),
-            provided_secret.encode("utf-8"),
-        ):
+        signing_names = (TIMESTAMP_HEADER, NONCE_HEADER, SIGNATURE_HEADER)
+        signing_values = [request.headers.getlist(name) for name in signing_names]
+        signing_present = any(values for values in signing_values)
+        if signing_present and any(len(values) != 1 for values in signing_values):
+            signature_result = SignatureValidator.INVALID
+        else:
+            try:
+                declared_length = int(request.headers.get("content-length", "0"))
+            except ValueError:
+                declared_length = -1
+            max_body_bytes = 2 * 1024 * 1024
+            if declared_length < 0 or declared_length > max_body_bytes:
+                signature_result = SignatureValidator.INVALID
+            else:
+                body = await request.body()
+                signature_result = (
+                    SignatureValidator.INVALID
+                    if len(body) > max_body_bytes
+                    else internal_signature_validator.validate(
+                        expected_secret,
+                        request.method,
+                        request.url.path
+                        + (("?" + request.url.query) if request.url.query else ""),
+                        body,
+                        signing_values[0][0] if signing_values[0] else None,
+                        signing_values[1][0] if signing_values[1] else None,
+                        signing_values[2][0] if signing_values[2] else None,
+                    )
+                )
+
+        try:
+            require_signature = env_flag(
+                "INTERNAL_AUTH_REQUIRE_SIGNATURE", default=False
+            )
+        except ValueError:
+            response = JSONResponse(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                content={
+                    "error": {
+                        "code": "RECOMMENDATION_AUTH_NOT_CONFIGURED",
+                        "message": "Internal signing configuration is invalid.",
+                    }
+                },
+            )
+            response.headers[CORRELATION_HEADER] = correlation_id
+            return response
+        if signature_result == SignatureValidator.VALID:
+            authenticated = True
+        elif signature_result == SignatureValidator.NO_SIGNATURE and not require_signature:
+            provided_values = request.headers.getlist(
+                RECOMMENDATION_INTERNAL_SECRET_HEADER
+            )
+            authenticated = len(provided_values) == 1 and hmac.compare_digest(
+                expected_secret.encode("utf-8"),
+                provided_values[0].encode("utf-8"),
+            )
+        else:
+            authenticated = False
+
+        if not authenticated:
             response = JSONResponse(
                 status_code=status.HTTP_403_FORBIDDEN,
                 content={
                     "error": {
-                        "code": "FORBIDDEN",
-                        "message": "Internal service authentication failed.",
+                        "code": (
+                            "INTERNAL_SIGNATURE_REQUIRED"
+                            if signature_result == SignatureValidator.NO_SIGNATURE
+                            and require_signature
+                            else "INVALID_INTERNAL_SIGNATURE"
+                            if signature_result != SignatureValidator.NO_SIGNATURE
+                            else "FORBIDDEN"
+                        ),
+                        "message": "Internal request authentication failed.",
                     }
                 },
             )

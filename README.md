@@ -62,26 +62,40 @@ $env:INTERNAL_SHARED_SECRET="replace-with-at-least-32-bytes"
 $env:RECOMMENDATION_INTERNAL_SECRET="replace-with-a-different-secret-at-least-32-bytes"
 $env:SOCIAL_GRAPH_SERVICE_SECRET="replace-with-a-different-secret-at-least-32-bytes"
 $env:SOCIAL_GRAPH_BASE_URL="http://localhost:1002"
+$env:INTERNAL_AUTH_REQUIRE_SIGNATURE="true"
+$env:INTERNAL_AUTH_SEND_LEGACY_SECRET="false"
+$env:RECOMMENDATION_MEDIA_ALLOWED_HOSTS="trusted-media-host.example"
+$env:RECOMMENDATION_MEDIA_BASE_URL="https://trusted-media-host.example"
+$env:RECOMMENDATION_MEDIA_REQUIRE_ALLOWLIST="true"
 ```
 
 Recommendation tables live in the `recommendation` PostgreSQL schema. Keep the
 password in environment configuration and never commit it to the repository.
 
 `INTERNAL_SHARED_SECRET` authenticates Gateway requests to public GraphQL.
-`RECOMMENDATION_INTERNAL_SECRET` authenticates SocialGraph calls to Recommendation's
-embedding REST API. Every `/internal/*` request requires:
+`RECOMMENDATION_INTERNAL_SECRET` signs SocialGraph calls to Recommendation's
+embedding REST API. Managed environments require:
 
 ```http
-X-Internal-RecommendationService-Secret: <SocialGraph-to-Recommendation secret>
+X-Internal-Timestamp: <unix seconds>
+X-Internal-Nonce: <single-use 32-character hex nonce>
+X-Internal-Signature: <HMAC-SHA256>
 X-Correlation-ID: <optional trace id>
 ```
 
-The service returns `403` for a missing or invalid Recommendation internal secret and fails
-closed with `503` when the configured secret is shorter than 32 bytes.
+The service returns `403` for missing, invalid, stale or replayed signatures and fails
+closed with `503` when the configured signing key is shorter than 32 bytes. Bare service
+runs retain an explicit legacy migration mode; Compose and `start-local.ps1` disable it.
 
-`SOCIAL_GRAPH_SERVICE_SECRET` is the independent outbound credential used when
-Recommendation calls SocialGraph candidate endpoints. These calls send
-`X-Internal-SocialGraphService-Secret`; they never reuse `X-Gateway-Secret`.
+`SOCIAL_GRAPH_SERVICE_SECRET` is the independent outbound signing key used when
+Recommendation calls SocialGraph candidate endpoints. Managed environments send only
+the HMAC headers; they never reuse `X-Gateway-Secret` or transmit the raw key.
+
+Media URLs are user-controlled input. Production therefore requires an exact hostname
+allowlist, rejects loopback/link-local/reserved/private destinations unless that private
+hostname is explicitly allowlisted, disables redirects, and caps both declared and
+actually streamed bytes. Videos are downloaded to a bounded temporary file before
+OpenCV reads them; OpenCV never receives a remote URL.
 
 ## Run
 
@@ -131,7 +145,9 @@ is loaded lazily on the first post embedding request. `PUT` upserts the row;
 
 ```http
 POST /internal/recommendation/users/{userId}/interactions
-X-Internal-RecommendationService-Secret: <secret>
+X-Internal-Timestamp: <unix seconds>
+X-Internal-Nonce: <single-use nonce>
+X-Internal-Signature: <HMAC-SHA256>
 Idempotency-Key: <stable SocialGraph outbox event id>
 Content-Type: application/json
 
@@ -200,7 +216,7 @@ calls SocialGraph with the independent `SOCIAL_GRAPH_SERVICE_SECRET`.
 
 ## Candidate and Ranking Flow
 
-1. Recommendation calls `GET {SOCIAL_GRAPH_BASE_URL}/internal/recommendation/post-candidate-ids?userId=...&limit=...` with `X-Internal-SocialGraphService-Secret` from `SOCIAL_GRAPH_SERVICE_SECRET` and the correlation ID.
+1. Recommendation calls `GET {SOCIAL_GRAPH_BASE_URL}/internal/recommendation/post-candidate-ids?userId=...&limit=...` with a timestamped HMAC derived from `SOCIAL_GRAPH_SERVICE_SECRET` and the correlation ID.
 2. SocialGraph returns a deduplicated JSON array of positive signed 64-bit content IDs for eligible `FeedPost`, `GroupPost`, and `Reel` objects after privacy and block filtering. Recommendation treats these IDs as opaque and does not infer object type or visibility from an embedding.
 3. Recommendation loads the interaction-trained user vector and available candidate post vectors from its own database.
 4. It ranks by semantic dot product. Candidates without a stored embedding receive score `0`; Python's stable sort preserves SocialGraph order for ties.
