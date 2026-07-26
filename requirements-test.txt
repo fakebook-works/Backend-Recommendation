@@ -1,10 +1,14 @@
-fastapi>=0.115,<1
-strawberry-graphql[fastapi]>=0.270,<1
+# Pinned to exact versions so a CI run is reproducible and cannot start failing because
+# an unrelated release changed behaviour. Versions match requirements.txt wherever the
+# two overlap; keep them in step when either is updated.
+
+fastapi==0.140.0
+strawberry-graphql[fastapi]==0.323.2
 greenlet==3.1.1
-SQLAlchemy>=2.0,<3
-psycopg2-binary>=2.9,<3
-numpy>=2.0,<3
-requests>=2.32,<3
-python-dotenv>=1.0,<2
-pytest>=8.3,<10
-httpx>=0.28,<1
+SQLAlchemy==2.0.51
+psycopg2-binary==2.9.12
+numpy==2.5.1
+requests==2.34.2
+python-dotenv==1.2.2
+pytest==9.1.1
+httpx==0.28.1
