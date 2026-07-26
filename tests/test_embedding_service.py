@@ -56,3 +56,49 @@ def test_media_only_post_fails_when_no_media_can_be_processed(monkeypatch):
             "",
             ["https://example.com/unavailable.jpg"],
         )
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "ftp://8.8.8.8/x.jpg",  # non-http scheme
+        "http:///no-host.jpg",  # missing host
+        "http://127.0.0.1/x.jpg",  # loopback
+        "http://[::1]/x.jpg",  # loopback v6
+        "http://0.0.0.0/x.jpg",  # unspecified
+        "http://169.254.169.254/latest/meta-data",  # cloud metadata (SSRF crown jewel)
+    ],
+)
+def test_ssrf_guard_rejects_dangerous_media_urls(url):
+    # Literal IPs are validated without any DNS lookup, so this stays offline.
+    assert embedding_service._is_safe_media_url(url) is False
+
+
+def test_ssrf_guard_allows_public_literal_ip():
+    assert embedding_service._is_safe_media_url("http://8.8.8.8/x.jpg") is True
+
+
+def test_ssrf_guard_allows_private_media_hosts_by_default():
+    assert embedding_service._is_safe_media_url("http://10.0.0.5/x.jpg") is True
+
+
+def test_ssrf_guard_blocks_private_media_hosts_when_opted_in(monkeypatch):
+    monkeypatch.setenv("RECOMMENDATION_MEDIA_BLOCK_PRIVATE", "1")
+    assert embedding_service._is_safe_media_url("http://10.0.0.5/x.jpg") is False
+    assert embedding_service._is_safe_media_url("http://192.168.1.10/x.jpg") is False
+
+
+def test_ssrf_guard_enforces_host_allowlist(monkeypatch):
+    monkeypatch.setenv("RECOMMENDATION_MEDIA_ALLOWED_HOSTS", "cdn.example.com")
+    # A public IP that is not on the allowlist is refused even though it resolves fine.
+    assert embedding_service._is_safe_media_url("http://8.8.8.8/x.jpg") is False
+
+
+def test_read_capped_stops_over_limit():
+    class _Streaming:
+        def iter_content(self, _chunk_size):
+            yield b"a" * 10
+            yield b"b" * 10
+
+    assert embedding_service._read_capped(_Streaming(), max_bytes=15) is None
+    assert embedding_service._read_capped(_Streaming(), max_bytes=100) == b"a" * 10 + b"b" * 10

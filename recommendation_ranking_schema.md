@@ -28,6 +28,10 @@ Registration uses an idempotent insert: an existing vector is retained on retry.
 
 Post creation and update use an upsert keyed by `post_id`.
 
+## `recommendation_interactions`
+
+An idempotent feedback ledger backing `record_recommendation_interaction`. Each row keys a SocialGraph outbox event so at-least-once interaction delivery logs and applies each interaction to the user vector only once; replayed keys are ignored.
+
 ## Runtime Data Flow
 
 1. Candidate IDs come from SocialGraph's authenticated ID-only `post-candidate-ids` REST API.

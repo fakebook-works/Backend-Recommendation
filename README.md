@@ -86,7 +86,7 @@ Recommendation calls SocialGraph candidate endpoints. These calls send
 ## Run
 
 ```powershell
-.\.venv\Scripts\python.exe -m uvicorn ForFakebook.EmbeddingModel:app --host 0.0.0.0 --port 8000
+.\.venv\Scripts\python.exe -m uvicorn ForFakebook.EmbeddingModel:app --host 0.0.0.0 --port 1003
 ```
 
 Health check:

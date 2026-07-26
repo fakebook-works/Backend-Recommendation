@@ -16,7 +16,7 @@ For each feed request, Recommendation calls SocialGraph:
 
 ```http
 GET /internal/recommendation/post-candidate-ids?userId={userId}&limit={limit}
-X-Gateway-Secret: <shared secret>
+X-Internal-SocialGraphService-Secret: <shared secret>
 X-Correlation-ID: <trace id>
 ```
 
