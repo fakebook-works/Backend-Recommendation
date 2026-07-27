@@ -13,6 +13,8 @@ from urllib.parse import urlparse
 import numpy as np
 import requests
 
+from .http_resilience import resilient_get
+
 # --- SSRF hardening ----------------------------------------------------------
 # Media URLs embedded here come from user-authored posts, so a crafted URL can
 # make this worker fetch internal targets (cloud metadata at 169.254.169.254,
@@ -218,7 +220,7 @@ def _download_capped_to_temp(url: str, max_bytes: int) -> str | None:
     suffix = os.path.splitext(urlparse(url).path)[1][:10]
     temporary_path: str | None = None
     try:
-        with requests.get(
+        with resilient_get(
             url,
             timeout=(3.05, 15),
             stream=True,
@@ -280,7 +282,7 @@ def download_image(url: str) -> Any | None:
     from PIL import Image
 
     try:
-        with requests.get(
+        with resilient_get(
             url, timeout=(3.05, 10), stream=True, allow_redirects=False
         ) as response:
             status_code = getattr(response, "status_code", 200)

@@ -27,6 +27,7 @@ from .internal_signing import (
     env_flag,
     validator as internal_signature_validator,
 )
+from .telemetry import configure_observability
 
 
 GATEWAY_SECRET_HEADER = "X-Gateway-Secret"
@@ -36,6 +37,7 @@ USER_ID_HEADER = "X-User-Id"
 MAX_SIGNED_64_BIT_ID = 9_223_372_036_854_775_807
 
 app = FastAPI(title="Fakebook Recommendation", version="1.0")
+configure_observability(app, "fakebook-recommendation")
 
 
 @app.middleware("http")
@@ -75,7 +77,7 @@ async def internal_security_and_correlation(request: Request, call_next):
                 signature_result = (
                     SignatureValidator.INVALID
                     if len(body) > max_body_bytes
-                    else internal_signature_validator.validate(
+                    else await internal_signature_validator.validate(
                         expected_secret,
                         request.method,
                         request.url.path
@@ -98,6 +100,18 @@ async def internal_security_and_correlation(request: Request, call_next):
                     "error": {
                         "code": "RECOMMENDATION_AUTH_NOT_CONFIGURED",
                         "message": "Internal signing configuration is invalid.",
+                    }
+                },
+            )
+            response.headers[CORRELATION_HEADER] = correlation_id
+            return response
+        if signature_result == SignatureValidator.UNAVAILABLE:
+            response = JSONResponse(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                content={
+                    "error": {
+                        "code": "INTERNAL_REPLAY_PROTECTION_UNAVAILABLE",
+                        "message": "Internal replay protection is unavailable.",
                     }
                 },
             )
@@ -200,6 +214,17 @@ def _translate_operation_error(exception: Exception) -> HTTPException:
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/health/ready")
+async def ready() -> Response:
+    try:
+        require_signature = env_flag("INTERNAL_AUTH_REQUIRE_SIGNATURE", default=False)
+    except ValueError:
+        return JSONResponse(status_code=503, content={"status": "unavailable"})
+    if require_signature and not await internal_signature_validator.is_available():
+        return JSONResponse(status_code=503, content={"status": "unavailable"})
+    return JSONResponse(status_code=200, content={"status": "ready"})
 
 
 @app.put(

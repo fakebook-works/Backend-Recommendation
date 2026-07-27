@@ -4,9 +4,11 @@ import hashlib
 import hmac
 import os
 import secrets
-import threading
 import time
 from urllib.parse import urlencode, urlsplit
+
+from redis.asyncio import Redis
+from redis.exceptions import RedisError
 
 
 TIMESTAMP_HEADER = "X-Internal-Timestamp"
@@ -101,13 +103,33 @@ class SignatureValidator:
     NO_SIGNATURE = "no_signature"
     VALID = "valid"
     INVALID = "invalid"
+    UNAVAILABLE = "unavailable"
 
-    def __init__(self):
-        self._seen: dict[str, float] = {}
-        self._lock = threading.Lock()
-        self._validation_count = 0
+    def __init__(self, redis_client=None):
+        self._redis_client = redis_client
 
-    def validate(
+    def set_redis_client_for_testing(self, redis_client) -> None:
+        self._redis_client = redis_client
+
+    def _client(self):
+        if self._redis_client is not None:
+            return self._redis_client
+        url = os.getenv("SECURITY_REDIS_URL", "").strip()
+        if not url:
+            return None
+        timeout = max(
+            0.1,
+            min(float(os.getenv("INTERNAL_AUTH_REDIS_TIMEOUT_SECONDS", "1")), 5.0),
+        )
+        self._redis_client = Redis.from_url(
+            url,
+            socket_connect_timeout=timeout,
+            socket_timeout=timeout,
+            decode_responses=True,
+        )
+        return self._redis_client
+
+    async def validate(
         self,
         secret: str,
         method: str,
@@ -162,20 +184,31 @@ class SignatureValidator:
         if not hmac.compare_digest(expected, signature_header.lower()):
             return self.INVALID
 
-        expires_at = now + retention
-        with self._lock:
-            existing = self._seen.get(nonce_header)
-            if existing is not None and existing >= now:
-                return self.INVALID
-            self._seen[nonce_header] = expires_at
-            self._validation_count += 1
-            if self._validation_count % 256 == 0:
-                self._seen = {
-                    nonce: expiry
-                    for nonce, expiry in self._seen.items()
-                    if expiry >= now
-                }
-        return self.VALID
+        try:
+            client = self._client()
+            if client is None:
+                return self.UNAVAILABLE
+            prefix = os.getenv(
+                "INTERNAL_AUTH_REDIS_KEY_PREFIX", "fakebook:internal-nonce:v1"
+            ).strip()
+            if not prefix or len(prefix) > 100:
+                return self.UNAVAILABLE
+            claimed = await client.set(
+                f"{prefix}:recommendation:{nonce_header.lower()}",
+                "1",
+                ex=retention,
+                nx=True,
+            )
+            return self.VALID if claimed else self.INVALID
+        except (RedisError, TimeoutError, OSError, ValueError):
+            return self.UNAVAILABLE
+
+    async def is_available(self) -> bool:
+        try:
+            client = self._client()
+            return bool(client is not None and await client.ping())
+        except (RedisError, TimeoutError, OSError, ValueError):
+            return False
 
 
 validator = SignatureValidator()

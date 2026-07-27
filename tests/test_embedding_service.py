@@ -155,15 +155,15 @@ def test_capped_download_refuses_redirect_and_does_not_follow(monkeypatch):
         captured.update(kwargs)
         return _Response([b"redirect"], status_code=302)
 
-    monkeypatch.setattr(embedding_service.requests, "get", fake_get)
+    monkeypatch.setattr(embedding_service, "resilient_get", fake_get)
     assert embedding_service._download_capped_to_temp("http://8.8.8.8/a.mp4", 100) is None
     assert captured["allow_redirects"] is False
 
 
 def test_capped_download_checks_streamed_size_not_only_content_length(monkeypatch):
     monkeypatch.setattr(
-        embedding_service.requests,
-        "get",
+        embedding_service,
+        "resilient_get",
         lambda *_args, **_kwargs: _Response([b"a" * 8, b"b" * 8], headers={"Content-Length": "8"}),
     )
     assert embedding_service._download_capped_to_temp("http://8.8.8.8/a.mp4", 12) is None
@@ -184,8 +184,8 @@ def test_video_decoder_receives_local_bounded_file_and_temp_is_deleted(monkeypat
             seen["released"] = True
 
     monkeypatch.setattr(
-        embedding_service.requests,
-        "get",
+        embedding_service,
+        "resilient_get",
         lambda *_args, **_kwargs: _Response([b"bounded-video"]),
     )
     monkeypatch.setitem(sys.modules, "cv2", SimpleNamespace(VideoCapture=FakeCapture))

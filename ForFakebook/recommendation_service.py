@@ -3,10 +3,10 @@ from __future__ import annotations
 from collections.abc import Callable
 
 import numpy as np
-import requests
 from sqlalchemy import text
 
 from .database import parse_vector
+from .http_resilience import resilient_get
 from .internal_signing import signed_headers
 
 
@@ -20,7 +20,7 @@ def fetch_post_candidate_ids(
     social_graph_base_url: str,
     shared_secret: str,
     correlation_id: str | None = None,
-    http_get: Callable = requests.get,
+    http_get: Callable = resilient_get,
 ) -> list[int]:
     url = f"{social_graph_base_url.rstrip('/')}/internal/recommendation/post-candidate-ids"
     params = {"userId": user_id, "limit": limit}
@@ -67,7 +67,7 @@ def fetch_reel_candidate_ids(
     shared_secret: str,
     mode: str = "FOR_YOU",
     correlation_id: str | None = None,
-    http_get: Callable = requests.get,
+    http_get: Callable = resilient_get,
 ) -> list[int]:
     url = f"{social_graph_base_url.rstrip('/')}/internal/recommendation/reel-candidates"
     params = {"userId": user_id, "limit": limit}

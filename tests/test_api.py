@@ -16,12 +16,35 @@ from ForFakebook.internal_signing import (
     SIGNATURE_HEADER,
     TIMESTAMP_HEADER,
     signed_headers,
+    validator as internal_signature_validator,
 )
 
 
 GATEWAY_SHARED_SECRET = "gateway-test-shared-secret-at-least-32-bytes"
 SOCIAL_GRAPH_SHARED_SECRET = "social-graph-test-shared-secret-at-least-32-bytes"
 SNOWFLAKE_ID = 9_000_000_000_000_001
+
+
+class FakeNonceRedis:
+    def __init__(self):
+        self.keys = set()
+
+    async def set(self, key, value, *, ex, nx):
+        if key in self.keys:
+            return None
+        self.keys.add(key)
+        return True
+
+    async def ping(self):
+        return True
+
+
+class FailingNonceRedis:
+    async def set(self, key, value, *, ex, nx):
+        raise OSError("redis unavailable")
+
+    async def ping(self):
+        raise OSError("redis unavailable")
 
 
 class FakeOperations:
@@ -71,10 +94,13 @@ def api(monkeypatch):
     monkeypatch.setenv("INTERNAL_SHARED_SECRET", GATEWAY_SHARED_SECRET)
     monkeypatch.setenv("RECOMMENDATION_INTERNAL_SECRET", SOCIAL_GRAPH_SHARED_SECRET)
     monkeypatch.setenv("SOCIAL_GRAPH_SERVICE_SECRET", SOCIAL_GRAPH_SHARED_SECRET)
+    monkeypatch.setenv("SECURITY_REDIS_URL", "redis://test.invalid:6379/0")
+    internal_signature_validator.set_redis_client_for_testing(FakeNonceRedis())
     app.dependency_overrides[get_operations] = lambda: fake
     with TestClient(app) as client:
         yield client, fake
     app.dependency_overrides.clear()
+    internal_signature_validator.set_redis_client_for_testing(None)
 
 
 def internal_headers(correlation_id=None):
@@ -142,6 +168,23 @@ def test_internal_signature_is_required_and_nonce_replay_is_rejected(api, monkey
     assert replay.status_code == 403
     assert replay.json()["error"]["code"] == "INVALID_INTERNAL_SIGNATURE"
     assert {TIMESTAMP_HEADER, NONCE_HEADER, SIGNATURE_HEADER}.issubset(headers)
+
+
+def test_valid_internal_signature_fails_closed_when_redis_is_unavailable(api, monkeypatch):
+    client, _ = api
+    monkeypatch.setenv("INTERNAL_AUTH_REQUIRE_SIGNATURE", "true")
+    internal_signature_validator.set_redis_client_for_testing(FailingNonceRedis())
+    path = f"/internal/recommendation/users/{SNOWFLAKE_ID}/embedding"
+    headers = signed_headers(
+        SOCIAL_GRAPH_SHARED_SECRET,
+        "PUT",
+        "http://testserver" + path,
+    )
+
+    response = client.put(path, headers=headers)
+
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "INTERNAL_REPLAY_PROTECTION_UNAVAILABLE"
 
 
 def test_invalid_internal_signing_flag_fails_closed(api, monkeypatch):
