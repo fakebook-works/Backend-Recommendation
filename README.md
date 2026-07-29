@@ -29,7 +29,7 @@ recommendation_interactions.sql Additive personalization feedback ledger
 
 ## Requirements
 
-- Python 3.9 or later
+- Python 3.11
 - PostgreSQL with the `vector` extension
 - The three schema files in this repository
 

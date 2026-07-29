@@ -22,7 +22,8 @@ strawberry-graphql[fastapi]==0.323.2
 greenlet==3.1.1
 SQLAlchemy==2.0.51
 psycopg2-binary==2.9.12
-numpy==2.5.1
+# 2.5.x requires Python 3.12; the service image and CI intentionally run 3.11.
+numpy==2.4.6
 requests==2.34.2
 urllib3==2.7.0
 python-dotenv==1.2.2
