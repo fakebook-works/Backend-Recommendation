@@ -1,3 +1,6 @@
+# PyTorch and opencv-python-headless publish glibc manylinux wheels but no musllinux
+# wheels. Alpine would compile the ML stack from source and produce a larger, fragile
+# image, so this service deliberately uses the smallest compatible glibc base.
 FROM python:3.11-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \

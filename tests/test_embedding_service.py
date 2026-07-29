@@ -7,6 +7,11 @@ from types import SimpleNamespace
 from ForFakebook import embedding_service
 
 
+def test_default_video_download_limit_matches_upload_server_500_mib(monkeypatch):
+    monkeypatch.delenv("RECOMMENDATION_VIDEO_MAX_BYTES", raising=False)
+    assert embedding_service._max_video_bytes() == 500 * 1024 * 1024
+
+
 class FakeTextModel:
     def __init__(self):
         self.calls = []
