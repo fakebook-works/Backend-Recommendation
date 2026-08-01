@@ -8,7 +8,6 @@ from sqlalchemy import text
 from .database import (
     SessionLocal,
     create_user_embedding_if_missing,
-    ensure_interaction_schema,
     parse_vector,
     save_post_embedding,
     vector_literal,
@@ -97,7 +96,6 @@ class RecommendationOperations:
         weight = INTERACTION_WEIGHTS[normalized_action]
         with self._session() as db:
             try:
-                ensure_interaction_schema(db)
                 claimed = db.execute(
                     text(
                         """
@@ -181,7 +179,6 @@ class RecommendationOperations:
         self._validate_id(user_id, "user_id")
         with self._session() as db:
             try:
-                ensure_interaction_schema(db)
                 db.execute(
                     text("DELETE FROM recommendation_interactions WHERE user_id = :user_id"),
                     {"user_id": user_id},
@@ -208,7 +205,6 @@ class RecommendationOperations:
         self._validate_id(post_id, "post_id")
         with self._session() as db:
             try:
-                ensure_interaction_schema(db)
                 db.execute(
                     text("DELETE FROM recommendation_interactions WHERE target_id = :post_id"),
                     {"post_id": post_id},

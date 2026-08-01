@@ -3,6 +3,7 @@ import os
 import pytest
 from fastapi.testclient import TestClient
 
+import ForFakebook.EmbeddingModel as recommendation_api
 from ForFakebook.EmbeddingModel import (
     CORRELATION_HEADER,
     GATEWAY_SECRET_HEADER,
@@ -91,6 +92,8 @@ class FakeOperations:
 @pytest.fixture()
 def api(monkeypatch):
     fake = FakeOperations()
+    monkeypatch.setattr(recommendation_api, "recommendation_schema_is_ready", lambda: True)
+    monkeypatch.setenv("INTERNAL_AUTH_REQUIRE_SIGNATURE", "false")
     monkeypatch.setenv("INTERNAL_SHARED_SECRET", GATEWAY_SHARED_SECRET)
     monkeypatch.setenv("RECOMMENDATION_INTERNAL_SECRET", SOCIAL_GRAPH_SHARED_SECRET)
     monkeypatch.setenv("SOCIAL_GRAPH_SERVICE_SECRET", SOCIAL_GRAPH_SHARED_SECRET)
@@ -101,6 +104,18 @@ def api(monkeypatch):
         yield client, fake
     app.dependency_overrides.clear()
     internal_signature_validator.set_redis_client_for_testing(None)
+
+
+def test_readiness_requires_owner_migrated_database_schema(api, monkeypatch):
+    client, _ = api
+
+    assert client.get("/health/ready").status_code == 200
+
+    monkeypatch.setattr(recommendation_api, "recommendation_schema_is_ready", lambda: False)
+
+    response = client.get("/health/ready")
+    assert response.status_code == 503
+    assert response.json() == {"status": "unavailable"}
 
 
 def internal_headers(correlation_id=None):

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hmac
 import os
 import uuid
@@ -13,6 +14,7 @@ from pydantic import BaseModel, Field, model_validator
 from strawberry.fastapi import GraphQLRouter
 from strawberry.types import Info
 
+from .database import recommendation_schema_is_ready
 from .operations import (
     InteractionTargetUnavailableError,
     RecommendationOperations,
@@ -223,6 +225,8 @@ async def ready() -> Response:
     except ValueError:
         return JSONResponse(status_code=503, content={"status": "unavailable"})
     if require_signature and not await internal_signature_validator.is_available():
+        return JSONResponse(status_code=503, content={"status": "unavailable"})
+    if not await asyncio.to_thread(recommendation_schema_is_ready):
         return JSONResponse(status_code=503, content={"status": "unavailable"})
     return JSONResponse(status_code=200, content={"status": "ready"})
 

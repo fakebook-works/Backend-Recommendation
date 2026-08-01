@@ -1,5 +1,8 @@
+import ForFakebook.database as database_module
+
 from ForFakebook.database import (
     create_user_embedding_if_missing,
+    recommendation_schema_is_ready,
     save_post_embedding,
     vector_literal,
 )
@@ -24,6 +27,31 @@ class FakeDatabase:
 
     def commit(self):
         self.commit_count += 1
+
+
+class FakeConnection:
+    def __init__(self, error=None):
+        self.error = error
+        self.statement = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exception_type, exception, traceback):
+        return False
+
+    def execute(self, statement):
+        self.statement = " ".join(str(statement).split())
+        if self.error is not None:
+            raise self.error
+
+
+class FakeEngine:
+    def __init__(self, connection):
+        self.connection = connection
+
+    def connect(self):
+        return self.connection
 
 
 def test_create_user_embedding_is_atomic_and_does_not_overwrite_existing_vector():
@@ -56,3 +84,24 @@ def test_save_post_embedding_upserts_without_timestamp_columns():
 
 def test_vector_literal_uses_compact_pgvector_format():
     assert vector_literal([1, 0.125, -2.5]) == "[1,0.125,-2.5]"
+
+
+def test_recommendation_readiness_checks_all_owner_migrated_tables(monkeypatch):
+    connection = FakeConnection()
+    monkeypatch.setattr(database_module, "engine", FakeEngine(connection))
+
+    assert recommendation_schema_is_ready() is True
+    assert "recommendation.user_embeddings" in connection.statement
+    assert "recommendation.post_embeddings" in connection.statement
+    assert "recommendation.recommendation_interactions" in connection.statement
+    assert "CREATE " not in connection.statement.upper()
+
+
+def test_recommendation_readiness_fails_closed_when_schema_is_unavailable(monkeypatch):
+    monkeypatch.setattr(
+        database_module,
+        "engine",
+        FakeEngine(FakeConnection(error=PermissionError("schema unavailable"))),
+    )
+
+    assert recommendation_schema_is_ready() is False

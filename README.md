@@ -42,7 +42,8 @@ python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 ```
 
-Apply the idempotent schemas:
+Apply the idempotent schemas with the database migration owner before starting the
+runtime service:
 
 ```powershell
 psql -d fakebook -f .\user_embedding.sql
@@ -50,7 +51,11 @@ psql -d fakebook -f .\post_embedding.sql
 psql -d fakebook -f .\recommendation_interactions.sql
 ```
 
-Both tables use `vector(512)` and a `BIGINT` primary key.
+The runtime `fakebook_recommendation` role intentionally has no schema `CREATE`
+permission and never executes DDL. `/health/ready` returns `503` when these owner-run
+migrations are missing or unreadable instead of attempting to elevate runtime access.
+The two embedding tables use `vector(512)` and a `BIGINT` primary key; the interaction
+table is the idempotent personalization ledger.
 
 ## Configuration
 

@@ -72,6 +72,7 @@ def test_record_interaction_updates_user_vector_once():
     assert applied is True
     assert session.commit_count == 1
     assert session.rollback_count == 0
+    assert not any(call[0].lstrip().upper().startswith("CREATE ") for call in session.calls)
     assert any("pg_advisory_xact_lock" in call[0] for call in session.calls)
     upsert = next(call for call in session.calls if "INSERT INTO user_embeddings" in call[0])
     assert upsert[1]["user_id"] == 42
@@ -121,5 +122,10 @@ def test_deleting_user_or_post_removes_owned_feedback_ledger_rows():
         for call in post_session.calls
     )
     assert any("DELETE FROM post_embeddings" in call[0] for call in post_session.calls)
+    assert not any(
+        call[0].lstrip().upper().startswith("CREATE ")
+        for session in (user_session, post_session)
+        for call in session.calls
+    )
     assert user_session.commit_count == 1
     assert post_session.commit_count == 1

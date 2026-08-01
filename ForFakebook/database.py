@@ -70,27 +70,24 @@ def parse_vector(value) -> np.ndarray:
     return np.asarray(value, dtype=float)
 
 
-def ensure_interaction_schema(db) -> None:
-    """Create the additive feedback table without requiring a destructive migration."""
-    db.execute(
-        text(
-            """
-            CREATE TABLE IF NOT EXISTS recommendation_interactions (
-                idempotency_key VARCHAR(128) PRIMARY KEY,
-                user_id BIGINT NOT NULL,
-                target_id BIGINT NOT NULL,
-                action VARCHAR(16) NOT NULL,
-                weight REAL NOT NULL,
-                created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+def recommendation_schema_is_ready() -> bool:
+    """Return whether the owner-run Recommendation migrations are readable at runtime."""
+    if engine is None:
+        return False
+
+    try:
+        with engine.connect() as connection:
+            connection.execute(
+                text(
+                    """
+                    SELECT 1
+                    FROM recommendation.user_embeddings
+                    CROSS JOIN recommendation.post_embeddings
+                    CROSS JOIN recommendation.recommendation_interactions
+                    LIMIT 0
+                    """
+                )
             )
-            """
-        )
-    )
-    db.execute(
-        text(
-            """
-            CREATE INDEX IF NOT EXISTS ix_recommendation_interactions_user_created
-            ON recommendation_interactions (user_id, created_at DESC)
-            """
-        )
-    )
+        return True
+    except Exception:
+        return False
