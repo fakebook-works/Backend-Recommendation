@@ -28,7 +28,7 @@ jobs:
           pip install -r requirements-test.txt
 
       - name: Test
-        run: pytest --junit-xml=TestResults/pytest.xml
+        run: python -m pytest --junit-xml=TestResults/pytest.xml
 
       - name: Upload test results
         if: always()
