@@ -4,6 +4,7 @@ import asyncio
 import hmac
 import os
 import uuid
+from contextlib import asynccontextmanager
 from enum import Enum
 
 import strawberry
@@ -29,6 +30,7 @@ from .internal_signing import (
     env_flag,
     validator as internal_signature_validator,
 )
+from .migrations import migrate_database_on_startup
 from .telemetry import configure_observability
 
 
@@ -38,7 +40,13 @@ CORRELATION_HEADER = "X-Correlation-ID"
 USER_ID_HEADER = "X-User-Id"
 MAX_SIGNED_64_BIT_ID = 9_223_372_036_854_775_807
 
-app = FastAPI(title="Fakebook Recommendation", version="1.0")
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    await asyncio.to_thread(migrate_database_on_startup)
+    yield
+
+
+app = FastAPI(title="Fakebook Recommendation", version="1.0", lifespan=lifespan)
 configure_observability(app, "fakebook-recommendation")
 
 

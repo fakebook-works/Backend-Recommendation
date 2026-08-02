@@ -92,6 +92,7 @@ class FakeOperations:
 @pytest.fixture()
 def api(monkeypatch):
     fake = FakeOperations()
+    monkeypatch.setenv("RECOMMENDATION_DB_MIGRATIONS_ENABLED", "false")
     monkeypatch.setattr(recommendation_api, "recommendation_schema_is_ready", lambda: True)
     monkeypatch.setenv("INTERNAL_AUTH_REQUIRE_SIGNATURE", "false")
     monkeypatch.setenv("INTERNAL_SHARED_SECRET", GATEWAY_SHARED_SECRET)
@@ -106,7 +107,7 @@ def api(monkeypatch):
     internal_signature_validator.set_redis_client_for_testing(None)
 
 
-def test_readiness_requires_owner_migrated_database_schema(api, monkeypatch):
+def test_readiness_requires_startup_migrated_database_schema(api, monkeypatch):
     client, _ = api
 
     assert client.get("/health/ready").status_code == 200

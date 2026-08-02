@@ -71,7 +71,7 @@ def parse_vector(value) -> np.ndarray:
 
 
 def recommendation_schema_is_ready() -> bool:
-    """Return whether the owner-run Recommendation migrations are readable at runtime."""
+    """Return whether all startup-migrated Recommendation tables are readable at runtime."""
     if engine is None:
         return False
 

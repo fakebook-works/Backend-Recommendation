@@ -42,8 +42,9 @@ python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 ```
 
-Apply the idempotent schemas with the database migration owner before starting the
-runtime service:
+The service applies the three schema files automatically, in repository order, before
+accepting traffic. When startup migration is explicitly disabled, the equivalent manual
+commands are:
 
 ```powershell
 psql -d fakebook -f .\user_embedding.sql
@@ -51,11 +52,19 @@ psql -d fakebook -f .\post_embedding.sql
 psql -d fakebook -f .\recommendation_interactions.sql
 ```
 
-The runtime `fakebook_recommendation` role intentionally has no schema `CREATE`
-permission and never executes DDL. `/health/ready` returns `503` when these owner-run
-migrations are missing or unreadable instead of attempting to elevate runtime access.
-The two embedding tables use `vector(512)` and a `BIGINT` primary key; the interaction
-table is the idempotent personalization ledger.
+Startup migrations are enabled by default. They use a version/checksum ledger at
+`recommendation.schema_migrations` plus a PostgreSQL session advisory lock, and startup
+fails if pgvector or any migration is unavailable. In deployed environments set
+`RECOMMENDATION_MIGRATION_DATABASE_URL` to an elevated migration-owner connection. If it
+is absent, the migrator explicitly falls back to `DATABASE_URL`, which is convenient for
+local development but requires that role to have DDL and `CREATE EXTENSION` privileges.
+The root-level copies of the three SQL files are the authoritative migration inputs.
+Before recording a version, on recorded versions, and after the complete run, the
+migrator verifies the exact table columns, PostgreSQL types, modifiers, nullability,
+defaults, primary keys, and the interaction table's valid btree index. A partial legacy
+table therefore fails startup and is never accepted merely because its ledger row exists.
+The two embedding tables use `public.vector(512)` and a `BIGINT` primary key; the
+interaction table is the idempotent personalization ledger.
 
 ## Configuration
 
@@ -63,6 +72,8 @@ Set configuration through environment variables. Do not commit production secret
 
 ```powershell
 $env:DATABASE_URL="postgresql://fakebook:<password>@<host>:5432/fakebook?options=-csearch_path%3Drecommendation%2Cpublic"
+$env:RECOMMENDATION_MIGRATION_DATABASE_URL="postgresql://migration_owner:<password>@<host>:5432/fakebook"
+$env:RECOMMENDATION_DB_MIGRATIONS_ENABLED="true"
 $env:INTERNAL_SHARED_SECRET="replace-with-at-least-32-bytes"
 $env:RECOMMENDATION_INTERNAL_SECRET="replace-with-a-different-secret-at-least-32-bytes"
 $env:SOCIAL_GRAPH_SERVICE_SECRET="replace-with-a-different-secret-at-least-32-bytes"
@@ -76,6 +87,8 @@ $env:RECOMMENDATION_MEDIA_REQUIRE_ALLOWLIST="true"
 
 Recommendation tables live in the `recommendation` PostgreSQL schema. Keep the
 password in environment configuration and never commit it to the repository.
+Set `RECOMMENDATION_DB_MIGRATIONS_ENABLED=false` only when an external release step
+applies the same three versioned files and maintains the same ledger.
 
 `INTERNAL_SHARED_SECRET` authenticates Gateway requests to public GraphQL.
 `RECOMMENDATION_INTERNAL_SECRET` signs SocialGraph calls to Recommendation's

@@ -4,10 +4,10 @@ This document describes the schema used by the current Recommendation runtime. C
 
 ## Extension
 
-Both schema scripts enable pgvector:
+The authoritative root embedding schema files enable pgvector in `public`:
 
 ```sql
-CREATE EXTENSION IF NOT EXISTS vector;
+CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public;
 ```
 
 ## `user_embeddings`
@@ -32,6 +32,17 @@ Post creation and update use an upsert keyed by `post_id`.
 
 An idempotent feedback ledger backing `record_recommendation_interaction`. Each row keys a SocialGraph outbox event so at-least-once interaction delivery logs and applies each interaction to the user vector only once; replayed keys are ignored.
 
+| Column | Type |
+| --- | --- |
+| `idempotency_key` | `VARCHAR(128) PRIMARY KEY` |
+| `user_id` | `BIGINT NOT NULL` |
+| `target_id` | `BIGINT NOT NULL` |
+| `action` | `VARCHAR(16) NOT NULL` |
+| `weight` | `REAL NOT NULL` |
+| `created_at` | `TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP` |
+
+The required non-unique btree index has keys `(user_id, created_at DESC)`.
+
 ## Runtime Data Flow
 
 1. Candidate IDs come from SocialGraph's authenticated ID-only `post-candidate-ids` REST API.
@@ -50,6 +61,14 @@ psql -d fakebook -f .\post_embedding.sql
 psql -d fakebook -f .\recommendation_interactions.sql
 ```
 
-All three scripts are idempotent and must be run by the migration owner before the
-runtime container starts. The runtime Recommendation role intentionally has no schema
-`CREATE` privilege.
+All three scripts are idempotent and the default-on startup migrator runs them under a
+PostgreSQL session advisory lock. Applied versions and SHA-256 checksums are stored in
+`recommendation.schema_migrations`. Configure
+`RECOMMENDATION_MIGRATION_DATABASE_URL` for the migration owner because creating the
+`vector` extension can require elevated privileges; startup fails if pgvector or a
+migration is unavailable. `RECOMMENDATION_DB_MIGRATIONS_ENABLED=false` is the explicit
+opt-out for deployments that migrate in a separate release step. The root-level SQL
+files are authoritative. Every migration target is checked against its exact catalog
+shape before a ledger row is inserted, recorded rows are rechecked on every startup,
+and a final full validation rejects drift, partial legacy tables, or an invalid
+interaction index.
