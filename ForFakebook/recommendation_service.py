@@ -11,6 +11,7 @@ from .internal_signing import signed_headers
 
 
 MAX_SIGNED_64_BIT_ID = 9_223_372_036_854_775_807
+FOLLOWING_CANDIDATE_SOURCES = frozenset({"friend", "followed"})
 SOCIAL_GRAPH_INTERNAL_SECRET_HEADER = "X-Internal-SocialGraphService-Secret"
 
 
@@ -107,7 +108,10 @@ def fetch_reel_candidate_ids(
             raise ValueError("SocialGraph returned an invalid reel candidate ID.")
         if not isinstance(source, str):
             raise ValueError("SocialGraph returned an invalid reel candidate source.")
-        if normalized_mode == "FOLLOWING" and source != "followed":
+        # SocialGraph labels accepted friends as ``friend`` and active follows
+        # as ``followed``. FOLLOWING is the union of both audiences; privacy,
+        # block and membership policy have already been applied by SocialGraph.
+        if normalized_mode == "FOLLOWING" and source not in FOLLOWING_CANDIDATE_SOURCES:
             continue
         if value not in seen:
             seen.add(value)
@@ -203,12 +207,20 @@ def recommend_reels_logic(
 ) -> list[dict]:
     normalized_skip = max(0, skip)
     normalized_take = min(max(1, take), 100)
+    normalized_mode = mode.upper()
+    if normalized_mode not in {"FOR_YOU", "FOLLOWING"}:
+        raise ValueError("mode must be FOR_YOU or FOLLOWING")
+    # SocialGraph returns a bounded union of up to 200 friends and 200 active
+    # follows, plus public discovery candidates. Request the full bounded pool
+    # for FOLLOWING so newer public reels cannot crowd relationship candidates
+    # out before the source filter is applied.
+    candidate_limit = 500 if normalized_mode == "FOLLOWING" else min(500, normalized_skip + normalized_take + 200)
     candidate_ids = fetch_reel_candidate_ids(
         user_id,
-        min(500, normalized_skip + normalized_take + 200),
+        candidate_limit,
         social_graph_base_url,
         shared_secret,
-        mode,
+        normalized_mode,
         correlation_id,
     )
     return rank_candidate_ids(

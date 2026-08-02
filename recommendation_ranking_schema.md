@@ -47,6 +47,9 @@ The old `fb.rec_candidate_set`, `fb.rec_candidate`, `fb.rec_ranked_list`, and `f
 ```powershell
 psql -d fakebook -f .\user_embedding.sql
 psql -d fakebook -f .\post_embedding.sql
+psql -d fakebook -f .\recommendation_interactions.sql
 ```
 
-Both scripts are idempotent and can be run repeatedly.
+All three scripts are idempotent and must be run by the migration owner before the
+runtime container starts. The runtime Recommendation role intentionally has no schema
+`CREATE` privilege.

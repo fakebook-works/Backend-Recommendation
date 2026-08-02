@@ -204,8 +204,9 @@ Example variables:
 The public result deliberately contains only ranked `postId` values. The field name is retained for backward compatibility, but the value is a SocialGraph content-object ID and Home candidates may be `FeedPost`, `GroupPost`, or `Reel`. Ranking diagnostics are internal implementation details, not a frontend contract. In the composed Gateway schema, each item also has SocialGraph's nullable `post` field, hydrated as `FeedPostDetail`, `GroupPostDetail`, or `ReelDetail`. There is no GraphQL mutation for embedding writes.
 
 Reel ranking uses the same trusted-viewer boundary and embedding store. `FOR_YOU`
-uses all SocialGraph-approved candidates; `FOLLOWING` keeps candidates from followed
-authors only:
+uses all SocialGraph-approved candidates; `FOLLOWING` keeps candidates authored by
+accepted friends or users the viewer actively follows (SocialGraph has already
+applied privacy, block and membership policy):
 
 ```graphql
 query RecommendedReels($userId: ID!, $mode: ReelRecommendationMode!) {

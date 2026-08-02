@@ -140,7 +140,7 @@ def test_fetch_candidate_ids_rejects_malformed_socialgraph_payload():
         )
 
 
-def test_fetch_reel_candidates_filters_following_and_deduplicates():
+def test_fetch_reel_candidates_includes_friends_and_followed_for_following_and_deduplicates():
     captured = {}
 
     def fake_get(url, **kwargs):
@@ -149,8 +149,10 @@ def test_fetch_reel_candidates_filters_following_and_deduplicates():
         return FakeResponse(
             [
                 {"id": 201, "authorId": 1, "source": "recent_public", "createdAt": "now"},
+                {"id": 203, "authorId": 4, "source": "friend", "createdAt": "now"},
                 {"id": 202, "authorId": 2, "source": "followed", "createdAt": "now"},
                 {"id": 202, "authorId": 2, "source": "followed", "createdAt": "now"},
+                {"id": 204, "authorId": 5, "source": "pending_friend", "createdAt": "now"},
             ]
         )
 
@@ -163,7 +165,7 @@ def test_fetch_reel_candidates_filters_following_and_deduplicates():
         http_get=fake_get,
     )
 
-    assert result == [202]
+    assert result == [203, 202]
     assert captured["url"].endswith("/internal/recommendation/reel-candidates")
     assert captured["headers"]["X-Internal-SocialGraphService-Secret"] == "shared-secret-at-least-32-bytes-long"
     assert "X-Gateway-Secret" not in captured["headers"]
@@ -185,3 +187,25 @@ def test_recommend_reels_ranks_candidates(monkeypatch):
     )
 
     assert result == [{"reelId": 101}, {"reelId": 102}]
+
+
+def test_following_reels_request_the_full_bounded_relationship_pool(monkeypatch):
+    captured = {}
+
+    def fake_fetch(user_id, limit, base_url, secret, mode, correlation_id=None):
+        captured.update(user_id=user_id, limit=limit, mode=mode)
+        return []
+
+    monkeypatch.setattr(recommendation_service, "fetch_reel_candidate_ids", fake_fetch)
+
+    result = recommendation_service.recommend_reels_logic(
+        FakeDb(),
+        user_id=1,
+        social_graph_base_url="http://socialgraph",
+        shared_secret="shared-secret-at-least-32-bytes-long",
+        mode="FOLLOWING",
+        take=20,
+    )
+
+    assert result == []
+    assert captured == {"user_id": 1, "limit": 500, "mode": "FOLLOWING"}
