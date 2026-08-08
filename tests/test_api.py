@@ -290,6 +290,38 @@ def test_post_upsert_rejects_empty_content_and_media(api):
     assert not any(call[0] == "upsert_post" for call in fake.calls)
 
 
+def test_post_upsert_enforces_content_media_and_unicode_bounds(api):
+    client, fake = api
+    path = f"/internal/recommendation/posts/{SNOWFLAKE_ID + 40}/embedding"
+
+    overlong = client.put(
+        path,
+        headers=internal_headers(),
+        json={"content": "x" * 63_207},
+    )
+    too_many_media = client.put(
+        path,
+        headers=internal_headers(),
+        json={"mediaUrls": [f"/media/files/{index}.jpg" for index in range(11)]},
+    )
+    zalgo = client.put(
+        path,
+        headers=internal_headers(),
+        json={"content": "A" + "\u0301" * 20},
+    )
+    unicode_url = client.put(
+        path,
+        headers=internal_headers(),
+        json={"mediaUrls": ["/media/files/zalgo-\u0301.jpg"]},
+    )
+
+    assert overlong.status_code == 422
+    assert too_many_media.status_code == 422
+    assert zalgo.status_code == 422
+    assert unicode_url.status_code == 422
+    assert not any(call[0] == "upsert_post" and call[1] == SNOWFLAKE_ID + 40 for call in fake.calls)
+
+
 def test_recommendation_interaction_is_authenticated_and_idempotent(api):
     client, fake = api
     path = f"/internal/recommendation/users/{SNOWFLAKE_ID}/interactions"
@@ -351,6 +383,18 @@ def test_recommendation_interaction_requires_idempotency_key_and_valid_action(ap
 
     assert missing_key.status_code == 422
     assert invalid_action.status_code == 422
+    assert not any(call[0] == "record_interaction" for call in fake.calls)
+
+
+def test_recommendation_interaction_rejects_unicode_idempotency_key(api):
+    client, fake = api
+    response = client.post(
+        f"/internal/recommendation/users/{SNOWFLAKE_ID}/interactions",
+        headers={**internal_headers(), "Idempotency-Key": "save-\u0301"},
+        json={"targetId": SNOWFLAKE_ID + 7, "action": "SAVE"},
+    )
+
+    assert response.status_code == 400
     assert not any(call[0] == "record_interaction" for call in fake.calls)
 
 

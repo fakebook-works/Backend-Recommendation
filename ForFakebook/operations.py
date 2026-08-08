@@ -13,6 +13,12 @@ from .database import (
     vector_literal,
 )
 from .embedding_service import generate_multimodal_embedding
+from .input_security import (
+    MAX_CONTENT_LENGTH,
+    normalize_media_urls,
+    normalize_text,
+    validate_idempotency_key,
+)
 from .recommendation_service import recommend_feed_logic, recommend_reels_logic
 
 
@@ -89,9 +95,7 @@ class RecommendationOperations:
         normalized_action = action.strip().upper()
         if normalized_action not in INTERACTION_WEIGHTS:
             raise ValueError(f"unsupported recommendation interaction action: {action}")
-        normalized_key = idempotency_key.strip()
-        if not normalized_key or len(normalized_key) > 128:
-            raise ValueError("Idempotency-Key must contain between 1 and 128 characters")
+        normalized_key = validate_idempotency_key(idempotency_key)
 
         weight = INTERACTION_WEIGHTS[normalized_action]
         with self._session() as db:
@@ -194,6 +198,8 @@ class RecommendationOperations:
 
     def upsert_post_embedding(self, post_id: int, content: str, media_urls: list[str]) -> None:
         self._validate_id(post_id, "post_id")
+        content = normalize_text(content, MAX_CONTENT_LENGTH)
+        media_urls = normalize_media_urls(media_urls)
         if not content.strip() and not any(url.strip() for url in media_urls):
             raise ValueError("content or at least one media URL is required")
 

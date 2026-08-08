@@ -11,7 +11,7 @@ import strawberry
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse
 from graphql import GraphQLError
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from strawberry.fastapi import GraphQLRouter
 from strawberry.types import Info
 
@@ -31,6 +31,13 @@ from .internal_signing import (
     validator as internal_signature_validator,
 )
 from .migrations import migrate_database_on_startup
+from .input_security import (
+    MAX_CONTENT_LENGTH,
+    MAX_MEDIA_COUNT,
+    normalize_media_urls,
+    normalize_text,
+    validate_idempotency_key,
+)
 from .telemetry import configure_observability
 
 
@@ -52,7 +59,15 @@ configure_observability(app, "fakebook-recommendation")
 
 @app.middleware("http")
 async def internal_security_and_correlation(request: Request, call_next):
-    correlation_id = request.headers.get(CORRELATION_HEADER) or uuid.uuid4().hex
+    correlation_values = request.headers.getlist(CORRELATION_HEADER)
+    supplied_correlation_id = correlation_values[0] if len(correlation_values) == 1 else ""
+    correlation_id = (
+        supplied_correlation_id
+        if 0 < len(supplied_correlation_id) <= 128
+        and all("\x21" <= character <= "\x7e" for character in supplied_correlation_id)
+        else uuid.uuid4().hex
+    )
+    request.state.correlation_id = correlation_id
 
     if request.url.path == "/internal" or request.url.path.startswith("/internal/"):
         expected_secret = os.getenv("RECOMMENDATION_INTERNAL_SECRET", "")
@@ -166,8 +181,18 @@ async def internal_security_and_correlation(request: Request, call_next):
 
 
 class PostEmbeddingRequest(BaseModel):
-    content: str = Field(default="", max_length=50_000)
-    mediaUrls: list[str] = Field(default_factory=list, max_length=100)
+    content: str = Field(default="", max_length=MAX_CONTENT_LENGTH)
+    mediaUrls: list[str] = Field(default_factory=list, max_length=MAX_MEDIA_COUNT)
+
+    @field_validator("content")
+    @classmethod
+    def validate_content(cls, value: str) -> str:
+        return normalize_text(value, MAX_CONTENT_LENGTH)
+
+    @field_validator("mediaUrls")
+    @classmethod
+    def validate_media_urls(cls, value: list[str]) -> list[str]:
+        return normalize_media_urls(value)
 
     @model_validator(mode="after")
     def require_content_or_media(self):
@@ -322,6 +347,7 @@ def record_recommendation_interaction(
     operations: RecommendationOperations = Depends(get_operations),
 ) -> RecommendationInteractionPayload:
     try:
+        idempotency_key = validate_idempotency_key(idempotency_key)
         applied = operations.record_interaction(
             user_id,
             request.targetId,
@@ -372,6 +398,7 @@ class Query:
     ) -> list[RecommendationItem]:
         parsed_user_id = _parse_user_id(user_id)
         _require_trusted_viewer(info, parsed_user_id)
+        _validate_page(skip, take)
         operations: RecommendationOperations = info.context["operations"]
         rows = operations.recommend_feed(
             parsed_user_id,
@@ -397,6 +424,7 @@ class Query:
     ) -> list[ReelRecommendationItem]:
         parsed_user_id = _parse_user_id(user_id)
         _require_trusted_viewer(info, parsed_user_id)
+        _validate_page(skip, take)
         operations: RecommendationOperations = info.context["operations"]
         rows = operations.recommend_reels(
             parsed_user_id,
@@ -428,6 +456,14 @@ def _parse_user_id(user_id: strawberry.ID) -> int:
             extensions={"code": "BAD_USER_INPUT"},
         )
     return parsed_user_id
+
+
+def _validate_page(skip: int, take: int) -> None:
+    if skip < 0 or skip > 100_000 or take < 1 or take > 100:
+        raise GraphQLError(
+            "skip must be between 0 and 100000 and take must be between 1 and 100.",
+            extensions={"code": "BAD_USER_INPUT"},
+        )
 
 
 def _require_trusted_viewer(info: Info, requested_user_id: int) -> None:
@@ -476,7 +512,7 @@ async def graphql_context(
 ) -> dict:
     return {
         "operations": operations,
-        "correlation_id": request.headers.get(CORRELATION_HEADER),
+        "correlation_id": getattr(request.state, "correlation_id", None),
         "request": request,
     }
 
