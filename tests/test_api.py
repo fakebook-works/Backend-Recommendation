@@ -388,9 +388,12 @@ def test_recommendation_interaction_requires_idempotency_key_and_valid_action(ap
 
 def test_recommendation_interaction_rejects_unicode_idempotency_key(api):
     client, fake = api
+    # HTTPX deliberately refuses to encode non-ASCII header strings before the
+    # request reaches ASGI. Supply the UTF-8 bytes directly so this regression
+    # exercises the application boundary instead of failing inside the client.
     response = client.post(
         f"/internal/recommendation/users/{SNOWFLAKE_ID}/interactions",
-        headers={**internal_headers(), "Idempotency-Key": "save-\u0301"},
+        headers={**internal_headers(), "Idempotency-Key": "save-\u0301".encode("utf-8")},
         json={"targetId": SNOWFLAKE_ID + 7, "action": "SAVE"},
     )
 
